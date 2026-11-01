@@ -43,8 +43,6 @@ export const shaneApi = {
 			method: "POST",
 			body: JSON.stringify({ contacts, source }),
 		}),
-	setContactConsent: (id: string, consent: boolean) =>
-		request<ShaneContact>(`/contacts/${id}`, { method: "PUT", body: JSON.stringify({ consent }) }),
 	setContactOptedOut: (id: string, optedOut: boolean) =>
 		request<ShaneContact>(`/contacts/${id}`, { method: "PUT", body: JSON.stringify({ optedOut }) }),
 	deleteContact: (id: string) => request<void>(`/contacts/${id}`, { method: "DELETE" }),

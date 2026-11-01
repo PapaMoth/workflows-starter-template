@@ -716,31 +716,25 @@ function ContactsTab({ onError }: { onError: (e: string | null) => void }) {
 						)}
 						{contacts.map((c) => {
 							const suppressed = suppressedSet.has(c.phone);
-							const dialable = c.consent && !c.optedOut && !suppressed;
+							const dialable = c.consent && !c.optedOut && !suppressed && !!c.timezone;
 							return (
 								<tr key={c.id}>
 									<td className="px-3 py-2 text-neutral-900 dark:text-neutral-100">{c.name || "—"}</td>
 									<td className="px-3 py-2 text-neutral-500">{c.phone}</td>
 									<td className="px-3 py-2">
 										{c.optedOut ? (
-											<span className="text-amber-600 dark:text-amber-400">Opted out</span>
-										) : suppressed ? (
-											<span className="text-amber-600 dark:text-amber-400">Suppressed</span>
-										) : c.consent ? (
-											<span className="text-green-600 dark:text-green-400">Consented</span>
-										) : (
-											<span className="text-neutral-400">No consent</span>
-										)}
+												<span className="text-amber-600 dark:text-amber-400">Opted out</span>
+											) : suppressed ? (
+												<span className="text-amber-600 dark:text-amber-400">Suppressed</span>
+											) : !c.consent ? (
+												<span className="text-neutral-400">No consent</span>
+											) : !c.timezone ? (
+												<span className="text-amber-600 dark:text-amber-400">Needs time zone</span>
+											) : (
+												<span className="text-green-600 dark:text-green-400">Consented</span>
+											)}
 									</td>
 									<td className="px-3 py-2 text-right space-x-1">
-										{!c.consent && !c.optedOut && (
-											<button
-												className={ghostButtonClass}
-												onClick={() => shaneApi.setContactConsent(c.id, true).then(reload)}
-											>
-												Mark consented
-											</button>
-										)}
 										<button
 											className={ghostButtonClass}
 											disabled={!dialable || dialingId === c.id}

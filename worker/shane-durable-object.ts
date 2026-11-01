@@ -6,6 +6,7 @@ export interface ShaneContact {
 	phone: string;
 	consent: boolean;
 	optedOut: boolean;
+	timezone: string | null;
 	source: string | null;
 	createdAt: number;
 }
@@ -85,6 +86,7 @@ export class ShaneStoreDO extends DurableObject {
 					phone TEXT NOT NULL UNIQUE,
 					consent INTEGER NOT NULL DEFAULT 0,
 					opted_out INTEGER NOT NULL DEFAULT 0,
+					timezone TEXT,
 					source TEXT,
 					created_at INTEGER NOT NULL
 				);
@@ -130,6 +132,15 @@ export class ShaneStoreDO extends DurableObject {
 					created_at INTEGER NOT NULL
 				);
 			`);
+
+			// Databases created before the timezone column existed need it added.
+			// SQLite has no ADD COLUMN IF NOT EXISTS, so a duplicate-column error on
+			// already-migrated databases is expected and ignored.
+			try {
+				this.ctx.storage.sql.exec("ALTER TABLE contacts ADD COLUMN timezone TEXT");
+			} catch {
+				// column already present
+			}
 
 			const existing = this.ctx.storage.sql.exec("SELECT id FROM script WHERE id = 'current'").toArray();
 			if (existing.length === 0) {
@@ -189,8 +200,13 @@ export class ShaneStoreDO extends DurableObject {
 	}
 
 	/** Imports contacts, skipping any phone already on file (unique). Returns counts, not rows. */
+	/**
+	 * Imports contacts. A phone already on file is skipped, except that a
+	 * provided timezone updates it. Consent is only ever set on newly inserted
+	 * rows, so re-importing can't change an existing contact's consent.
+	 */
 	async importContacts(
-		contacts: Array<{ name?: string | null; phone: string; consent?: boolean }>,
+		contacts: Array<{ name?: string | null; phone: string; consent?: boolean; timezone?: string | null }>,
 		source: string,
 	): Promise<{ imported: number; skipped: number }> {
 		let imported = 0;
@@ -198,15 +214,19 @@ export class ShaneStoreDO extends DurableObject {
 		for (const c of contacts) {
 			const existing = this.ctx.storage.sql.exec("SELECT phone FROM contacts WHERE phone = ?", c.phone).toArray();
 			if (existing.length > 0) {
+				if (c.timezone) {
+					this.ctx.storage.sql.exec("UPDATE contacts SET timezone = ? WHERE phone = ?", c.timezone, c.phone);
+				}
 				skipped++;
 				continue;
 			}
 			this.ctx.storage.sql.exec(
-				"INSERT INTO contacts (id, name, phone, consent, opted_out, source, created_at) VALUES (?, ?, ?, ?, 0, ?, ?)",
+				"INSERT INTO contacts (id, name, phone, consent, opted_out, timezone, source, created_at) VALUES (?, ?, ?, ?, 0, ?, ?, ?)",
 				crypto.randomUUID(),
 				c.name ?? null,
 				c.phone,
 				c.consent ? 1 : 0,
+				c.timezone ?? null,
 				source,
 				Date.now(),
 			);
@@ -215,11 +235,12 @@ export class ShaneStoreDO extends DurableObject {
 		return { imported, skipped };
 	}
 
-	async setContactConsent(id: string, consent: boolean): Promise<ShaneContact | null> {
+	/** Revokes consent. Granting consent is only possible through an attested import. */
+	async revokeContactConsent(id: string): Promise<ShaneContact | null> {
 		const existing = this.ctx.storage.sql.exec("SELECT * FROM contacts WHERE id = ?", id).toArray();
 		if (existing.length === 0) return null;
-		this.ctx.storage.sql.exec("UPDATE contacts SET consent = ? WHERE id = ?", consent ? 1 : 0, id);
-		return { ...rowToContact(existing[0]), consent };
+		this.ctx.storage.sql.exec("UPDATE contacts SET consent = 0 WHERE id = ?", id);
+		return { ...rowToContact(existing[0]), consent: false };
 	}
 
 	async setContactOptedOut(id: string, optedOut: boolean): Promise<ShaneContact | null> {
@@ -435,6 +456,7 @@ function rowToContact(row: Record<string, unknown>): ShaneContact {
 		phone: String(row.phone),
 		consent: Number(row.consent) === 1,
 		optedOut: Number(row.opted_out) === 1,
+		timezone: row.timezone == null ? null : String(row.timezone),
 		source: row.source == null ? null : String(row.source),
 		createdAt: Number(row.created_at),
 	};

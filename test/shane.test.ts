@@ -58,7 +58,7 @@ describe("Shane AI API", () => {
 		});
 		expect(res.status).toBe(200);
 		const body = (await res.json()) as { contacts: Array<{ name: string; phone: string; consent: boolean }> };
-		expect(body.contacts).toEqual([{ name: "Jordan Keane", phone: "+15551234567", consent: true }]);
+		expect(body.contacts).toEqual([{ name: "Jordan Keane", phone: "+15551234567", consent: true, timezone: null }]);
 
 		const list = (await (
 			await SELF.fetch("https://example.com/api/shane/contacts")
@@ -80,7 +80,7 @@ describe("Shane AI API", () => {
 		const first = await SELF.fetch("https://example.com/api/shane/contacts/import", {
 			method: "POST",
 			body: JSON.stringify({
-				contacts: [{ name: "Jordan Keane", phone: "+15551234567", consent: true }],
+				contacts: [{ name: "Jordan Keane", phone: "+15551234567", consent: true, timezone: "UTC" }],
 				source: "csv",
 			}),
 		});
@@ -90,7 +90,7 @@ describe("Shane AI API", () => {
 		const second = await SELF.fetch("https://example.com/api/shane/contacts/import", {
 			method: "POST",
 			body: JSON.stringify({
-				contacts: [{ name: "Jordan Keane", phone: "+15551234567", consent: true }],
+				contacts: [{ name: "Jordan Keane", phone: "+15551234567", consent: true, timezone: "UTC" }],
 				source: "csv",
 			}),
 		});
@@ -102,7 +102,7 @@ describe("Shane AI API", () => {
 		expect(list).toHaveLength(1);
 	});
 
-	it("toggles a contact's consent", async () => {
+	it("refuses to grant consent through a plain update", async () => {
 		await SELF.fetch("https://example.com/api/shane/contacts/import", {
 			method: "POST",
 			body: JSON.stringify({ contacts: [{ phone: "+15557654321" }], source: "csv" }),
@@ -112,11 +112,45 @@ describe("Shane AI API", () => {
 		).json()) as Array<{ id: string; consent: boolean }>;
 		expect(contact.consent).toBe(false);
 
-		const res = await SELF.fetch(`https://example.com/api/shane/contacts/${contact.id}`, {
+		const grant = await SELF.fetch(`https://example.com/api/shane/contacts/${contact.id}`, {
 			method: "PUT",
 			body: JSON.stringify({ consent: true }),
 		});
-		expect((await res.json() as { consent: boolean }).consent).toBe(true);
+		expect(grant.status).toBe(400);
+		expect(((await grant.json()) as { error: string }).error).toMatch(/attested/);
+	});
+
+	it("can revoke consent through a plain update", async () => {
+		await SELF.fetch("https://example.com/api/shane/contacts/import", {
+			method: "POST",
+			body: JSON.stringify({ contacts: [{ phone: "+15557654322", consent: true, timezone: "UTC" }], source: "csv" }),
+		});
+		const [contact] = (await (
+			await SELF.fetch("https://example.com/api/shane/contacts")
+		).json()) as Array<{ id: string }>;
+
+		const revoke = await SELF.fetch(`https://example.com/api/shane/contacts/${contact.id}`, {
+			method: "PUT",
+			body: JSON.stringify({ consent: false }),
+		});
+		expect(((await revoke.json()) as { consent: boolean }).consent).toBe(false);
+	});
+
+	it("blocks dialing a consented contact that has no time zone on file", async () => {
+		await SELF.fetch("https://example.com/api/shane/contacts/import", {
+			method: "POST",
+			body: JSON.stringify({ contacts: [{ phone: "+15557654323", consent: true }], source: "csv" }),
+		});
+		const [contact] = (await (
+			await SELF.fetch("https://example.com/api/shane/contacts")
+		).json()) as Array<{ id: string }>;
+
+		const res = await SELF.fetch("https://example.com/api/shane/calls/dial", {
+			method: "POST",
+			body: JSON.stringify({ contactId: contact.id }),
+		});
+		expect(res.status).toBe(403);
+		expect(((await res.json()) as { error: string }).error).toMatch(/time zone/);
 	});
 
 	it("blocks dialing a contact that hasn't consented", async () => {
@@ -140,7 +174,7 @@ describe("Shane AI API", () => {
 	it("reports Bird as unconfigured when a consented contact is dialed outside of test secrets", async () => {
 		await SELF.fetch("https://example.com/api/shane/contacts/import", {
 			method: "POST",
-			body: JSON.stringify({ contacts: [{ phone: "+15552223333", consent: true }], source: "csv" }),
+			body: JSON.stringify({ contacts: [{ phone: "+15552223333", consent: true, timezone: "UTC" }], source: "csv" }),
 		});
 		const [contact] = (await (
 			await SELF.fetch("https://example.com/api/shane/contacts")
@@ -168,7 +202,7 @@ describe("Shane AI API", () => {
 	it("adds a suppression and then blocks dialing that number", async () => {
 		await SELF.fetch("https://example.com/api/shane/contacts/import", {
 			method: "POST",
-			body: JSON.stringify({ contacts: [{ phone: "+15554445555", consent: true }], source: "csv" }),
+			body: JSON.stringify({ contacts: [{ phone: "+15554445555", consent: true, timezone: "UTC" }], source: "csv" }),
 		});
 		const [contact] = (await (
 			await SELF.fetch("https://example.com/api/shane/contacts")
@@ -246,7 +280,7 @@ describe("Shane AI SMS campaigns", () => {
 			method: "POST",
 			body: JSON.stringify({
 				contacts: [
-					{ name: "Consented", phone: "+15551110001", consent: true },
+					{ name: "Consented", phone: "+15551110001", consent: true, timezone: "UTC" },
 					{ name: "NoConsent", phone: "+15551110002", consent: false },
 				],
 				source: "test",
@@ -270,7 +304,7 @@ describe("Shane AI SMS campaigns", () => {
 	it("blocks sending when Bird SMS isn't configured, after confirming eligibility matched", async () => {
 		await SELF.fetch("https://example.com/api/shane/contacts/import", {
 			method: "POST",
-			body: JSON.stringify({ contacts: [{ name: "Jordan", phone: "+15552220001", consent: true }], source: "test" }),
+			body: JSON.stringify({ contacts: [{ name: "Jordan", phone: "+15552220001", consent: true, timezone: "UTC" }], source: "test" }),
 		});
 
 		const res = await SELF.fetch("https://example.com/api/shane/campaign/send", {
@@ -285,7 +319,7 @@ describe("Shane AI SMS campaigns", () => {
 	it("rejects sending when the confirmed count no longer matches eligible contacts", async () => {
 		await SELF.fetch("https://example.com/api/shane/contacts/import", {
 			method: "POST",
-			body: JSON.stringify({ contacts: [{ name: "Jordan", phone: "+15552220002", consent: true }], source: "test" }),
+			body: JSON.stringify({ contacts: [{ name: "Jordan", phone: "+15552220002", consent: true, timezone: "UTC" }], source: "test" }),
 		});
 
 		const res = await SELF.fetch("https://example.com/api/shane/campaign/send", {

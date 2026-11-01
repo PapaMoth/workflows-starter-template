@@ -10,6 +10,7 @@ export interface ShaneContact {
 	phone: string;
 	consent: boolean;
 	optedOut: boolean;
+	timezone: string | null;
 	source: string | null;
 	createdAt: number;
 }
@@ -18,6 +19,7 @@ export interface ParsedContact {
 	name: string | null;
 	phone: string;
 	consent: boolean;
+	timezone?: string | null;
 }
 
 export type CallStatus = "dialing" | "completed" | "failed";

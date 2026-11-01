@@ -50,21 +50,21 @@ describe("parseCsvContacts", () => {
 	it("parses name, phone and consent columns", () => {
 		const csv = "name,phone,consent\nJordan Keane,555-123-4567,yes\nPriya Nandan,5551119999,no";
 		expect(parseCsvContacts(csv)).toEqual([
-			{ name: "Jordan Keane", phone: "+15551234567", consent: true },
-			{ name: "Priya Nandan", phone: "+15551119999", consent: false },
+			{ name: "Jordan Keane", phone: "+15551234567", consent: true, timezone: null },
+			{ name: "Priya Nandan", phone: "+15551119999", consent: false, timezone: null },
 		]);
 	});
 
 	it("drops rows with no resolvable phone number", () => {
 		const csv = "name,phone,consent\nNo Phone,,yes\nGood,5551234567,yes";
-		expect(parseCsvContacts(csv)).toEqual([{ name: "Good", phone: "+15551234567", consent: true }]);
+		expect(parseCsvContacts(csv)).toEqual([{ name: "Good", phone: "+15551234567", consent: true, timezone: null }]);
 	});
 
 	it("treats a headerless file as one bare phone number per line", () => {
 		const csv = "5551234567\n5559876543";
 		expect(parseCsvContacts(csv)).toEqual([
-			{ name: null, phone: "+15551234567", consent: false },
-			{ name: null, phone: "+15559876543", consent: false },
+			{ name: null, phone: "+15551234567", consent: false, timezone: null },
+			{ name: null, phone: "+15559876543", consent: false, timezone: null },
 		]);
 	});
 
@@ -78,8 +78,8 @@ describe("extractPhoneNumbersFromText", () => {
 		const text = "Call Jordan at (555) 123-4567 or back line 555-123-4567. Also Priya 555 987 6543.";
 		const contacts = extractPhoneNumbersFromText(text);
 		expect(contacts).toEqual([
-			{ name: null, phone: "+15551234567", consent: false },
-			{ name: null, phone: "+15559876543", consent: false },
+			{ name: null, phone: "+15551234567", consent: false, timezone: null },
+			{ name: null, phone: "+15559876543", consent: false, timezone: null },
 		]);
 	});
 
@@ -116,34 +116,35 @@ describe("filterDialable", () => {
 });
 
 describe("evaluateDialGate", () => {
-	const base = { consent: true, optedOut: false, phone: "+15551234567" };
+	const base = { consent: true, optedOut: false, phone: "+15551234567", timezone: "UTC" };
+	const at = (hourUtc: number) => new Date(Date.UTC(2026, 0, 15, hourUtc));
 
 	it("allows a consented, non-suppressed contact inside the calling window", () => {
-		expect(evaluateDialGate(base, new Set(), 14, 9, 20)).toEqual({ allowed: true });
+		expect(evaluateDialGate(base, new Set(), at(14), 9, 20)).toEqual({ allowed: true });
 	});
 
 	it("blocks a contact that hasn't consented", () => {
-		const result = evaluateDialGate({ ...base, consent: false }, new Set(), 14, 9, 20);
+		const result = evaluateDialGate({ ...base, consent: false }, new Set(), at(14), 9, 20);
 		expect(result.allowed).toBe(false);
 		expect(result.reason).toMatch(/consent/);
 	});
 
 	it("blocks a contact that opted out", () => {
-		const result = evaluateDialGate({ ...base, optedOut: true }, new Set(), 14, 9, 20);
+		const result = evaluateDialGate({ ...base, optedOut: true }, new Set(), at(14), 9, 20);
 		expect(result.allowed).toBe(false);
 		expect(result.reason).toMatch(/opted out/);
 	});
 
 	it("blocks a number on the suppression list", () => {
-		const result = evaluateDialGate(base, new Set([base.phone]), 14, 9, 20);
+		const result = evaluateDialGate(base, new Set([base.phone]), at(14), 9, 20);
 		expect(result.allowed).toBe(false);
 		expect(result.reason).toMatch(/suppression/);
 	});
 
 	it("blocks dialing outside the calling-hours window", () => {
-		const result = evaluateDialGate(base, new Set(), 6, 9, 20);
+		const result = evaluateDialGate(base, new Set(), at(6), 9, 20);
 		expect(result.allowed).toBe(false);
-		expect(result.reason).toMatch(/calling window/);
+		expect(result.reason).toMatch(/calling hours/);
 	});
 });
 

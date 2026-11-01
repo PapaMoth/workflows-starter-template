@@ -20,6 +20,7 @@ export interface Contact {
 	name: string | null;
 	phone: string; // E.164
 	consent: boolean;
+	timezone: string | null; // IANA name, e.g. America/New_York
 }
 
 /**
@@ -85,6 +86,9 @@ export function parseCsvContacts(text: string): Contact[] {
 	const consentIdx = header.findIndex(function (h) {
 		return h === "consent" || h === "opted_in" || h === "opt_in" || h === "opted in";
 	});
+	const tzIdx = header.findIndex(function (h) {
+		return h === "timezone" || h === "time zone" || h === "tz";
+	});
 
 	// No recognizable header: treat the whole file as one bare phone number per line.
 	if (phoneIdx === -1) {
@@ -96,7 +100,7 @@ export function parseCsvContacts(text: string): Contact[] {
 				return !!p;
 			})
 			.map(function (phone) {
-				return { name: null, phone: phone, consent: false };
+				return { name: null, phone: phone, consent: false, timezone: null };
 			});
 	}
 
@@ -112,6 +116,7 @@ export function parseCsvContacts(text: string): Contact[] {
 				name: nameIdx >= 0 ? cols[nameIdx] || null : null,
 				phone: phone,
 				consent: consentIdx >= 0 ? parseConsent(cols[consentIdx]) : false,
+				timezone: tzIdx >= 0 ? normalizeTimeZone(cols[tzIdx]) : null,
 			};
 		})
 		.filter(function (c): c is Contact {
@@ -133,7 +138,7 @@ export function extractPhoneNumbersFromText(text: string): Contact[] {
 		const phone = normalizePhone(m);
 		if (phone && !seen.has(phone)) {
 			seen.add(phone);
-			contacts.push({ name: null, phone: phone, consent: false });
+			contacts.push({ name: null, phone: phone, consent: false, timezone: null });
 		}
 	});
 	return contacts;
@@ -146,6 +151,33 @@ export function isWithinCallingWindow(
 	endHour: number,
 ): boolean {
 	return hour >= startHour && hour < endHour;
+}
+
+/** Returns the IANA zone name if the runtime recognizes it, otherwise null. */
+export function normalizeTimeZone(raw: string | null | undefined): string | null {
+	if (!raw) return null;
+	const zone = raw.trim();
+	if (!zone) return null;
+	try {
+		new Intl.DateTimeFormat("en-US", { timeZone: zone });
+		return zone;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Hour (0-23) in the given IANA zone at instant `now`, or null when the zone
+ * is missing or unknown. Calling hours are judged in the recipient's local
+ * time, so a missing zone means the hour can't be checked and dialing is refused.
+ */
+export function localHourIn(timeZone: string | null | undefined, now: Date): number | null {
+	const zone = normalizeTimeZone(timeZone);
+	if (!zone) return null;
+	const hour = Number(
+		new Intl.DateTimeFormat("en-US", { timeZone: zone, hour: "numeric", hourCycle: "h23" }).format(now),
+	);
+	return Number.isInteger(hour) && hour >= 0 && hour <= 23 ? hour : null;
 }
 
 /**
@@ -173,17 +205,24 @@ export interface DialGateResult {
  * in one place so nothing can place a call by skipping a check.
  */
 export function evaluateDialGate(
-	contact: { consent: boolean; optedOut: boolean; phone: string },
+	contact: { consent: boolean; optedOut: boolean; phone: string; timezone?: string | null },
 	suppressed: Set<string>,
-	nowHour: number,
+	now: Date,
 	windowStart: number,
 	windowEnd: number,
 ): DialGateResult {
 	if (!contact.consent) return { allowed: false, reason: "contact has not given consent to be called" };
 	if (contact.optedOut) return { allowed: false, reason: "contact has opted out" };
 	if (suppressed.has(contact.phone)) return { allowed: false, reason: "number is on the suppression list" };
-	if (!isWithinCallingWindow(nowHour, windowStart, windowEnd)) {
-		return { allowed: false, reason: `outside the configured calling window (${windowStart}:00-${windowEnd}:00)` };
+	const localHour = localHourIn(contact.timezone, now);
+	if (localHour === null) {
+		return { allowed: false, reason: "no valid time zone on file, so calling hours can't be checked" };
+	}
+	if (!isWithinCallingWindow(localHour, windowStart, windowEnd)) {
+		return {
+			allowed: false,
+			reason: `outside calling hours (${windowStart}:00-${windowEnd}:00 in the contact's local time)`,
+		};
 	}
 	return { allowed: true };
 }

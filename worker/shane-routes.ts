@@ -97,15 +97,25 @@ export async function handleShaneRequest(request: Request, env: Env): Promise<Re
 					name?: string | null;
 					phone: string;
 					consent?: boolean;
+					timezone?: string | null;
 				}>;
 				const result = await store.importContacts(contacts, source);
 				return Response.json(result, { status: 201 });
 			}
 			if (request.method === "PUT" && contactId) {
 				const updateBody = await readJson<{ consent?: unknown; optedOut?: unknown }>(request);
+				if (updateBody.consent === true) {
+					return Response.json(
+						{
+							error:
+								"Consent can't be granted from here. Import the contact through an attested CSV or PDF upload, which records consent with the import.",
+						},
+						{ status: 400 },
+					);
+				}
 				const updated =
-					typeof updateBody.consent === "boolean"
-						? await store.setContactConsent(contactId, updateBody.consent)
+					updateBody.consent === false
+						? await store.revokeContactConsent(contactId)
 						: typeof updateBody.optedOut === "boolean"
 							? await store.setContactOptedOut(contactId, updateBody.optedOut)
 							: null;
@@ -166,8 +176,7 @@ async function handleDial(
 
 	const suppressedList = await store.getSuppressedSet();
 	const window = callingWindow(env);
-	const nowHour = new Date().getUTCHours();
-	const gate = evaluateDialGate(contact, new Set(suppressedList), nowHour, window.start, window.end);
+	const gate = evaluateDialGate(contact, new Set(suppressedList), new Date(), window.start, window.end);
 	if (!gate.allowed) {
 		return Response.json({ error: "Dial blocked: " + gate.reason }, { status: 403 });
 	}

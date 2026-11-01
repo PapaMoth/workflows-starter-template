@@ -54,12 +54,12 @@ async function splitByEligibility(
 	const contacts = await store.listContacts();
 	const suppressed = new Set(await store.getSuppressedSet());
 	const window = outreachWindow(env);
-	const nowHour = new Date().getUTCHours();
+	const now = new Date();
 
 	const eligible: ShaneContact[] = [];
 	const excluded: Array<{ contact: ShaneContact; reason: string }> = [];
 	contacts.forEach((contact) => {
-		const gate: DialGateResult = evaluateDialGate(contact, suppressed, nowHour, window.start, window.end);
+		const gate: DialGateResult = evaluateDialGate(contact, suppressed, now, window.start, window.end);
 		if (gate.allowed) eligible.push(contact);
 		else excluded.push({ contact, reason: gate.reason ?? "not eligible" });
 	});
