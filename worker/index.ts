@@ -2,8 +2,10 @@
 export { MyWorkflow } from "./workflow";
 export { WorkflowStatusDO } from "./durable-object";
 export { CrmStoreDO } from "./crm-durable-object";
+export { ShaneStoreDO } from "./shane-durable-object";
 
 import { handleCrmRequest } from "./crm-routes";
+import { handleShaneRequest } from "./shane-routes";
 
 /**
  * Main Worker fetch handler
@@ -21,6 +23,11 @@ export default {
 		// API: CRM resource routes (contacts, companies, deals, tasks, notes)
 		if (url.pathname.startsWith("/api/crm/")) {
 			return handleCrmRequest(request, env);
+		}
+
+		// API: Shane AI resource routes (script, contacts, suppressions, calls)
+		if (url.pathname.startsWith("/api/shane/")) {
+			return handleShaneRequest(request, env);
 		}
 
 		// API: Start a new workflow instance

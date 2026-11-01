@@ -40,6 +40,10 @@
 			{
 				"name": "CRM_STORE",
 				"class_name": "CrmStoreDO"
+			},
+			{
+				"name": "SHANE_STORE",
+				"class_name": "ShaneStoreDO"
 			}
 		]
 	},
@@ -55,7 +59,22 @@
 		{
 			"tag": "v2",
 			"new_sqlite_classes": ["CrmStoreDO"]
+		},
+		{
+			"tag": "v3",
+			"new_sqlite_classes": ["ShaneStoreDO"]
 		}
 	],
+	/**
+	 * Shane AI: non-secret defaults. BIRD_API_KEY and BIRD_FROM_NUMBER are
+	 * secrets — set with `wrangler secret put` (prod) or in .dev.vars (local),
+	 * never here. See .dev.vars.example.
+	 */
+	"vars": {
+		"BIRD_API_BASE": "https://us1.platform.bird.com",
+		"CALL_WINDOW_START": "9",
+		"CALL_WINDOW_END": "20",
+		"OPT_OUT_DIGIT": "9"
+	},
 	"upload_source_maps": true
 }

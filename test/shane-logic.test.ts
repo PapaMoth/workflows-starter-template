@@ -1,0 +1,213 @@
+import { describe, it, expect } from "vitest";
+import {
+	normalizePhone,
+	parseCsvContacts,
+	extractPhoneNumbersFromText,
+	isWithinCallingWindow,
+	filterDialable,
+	evaluateDialGate,
+	chunkScript,
+	buildCallSequenceDefinition,
+	ScriptTooLongError,
+	MAX_SAY_BYTES,
+	MAX_SCRIPT_CHUNKS,
+} from "../worker/shane-logic";
+
+describe("normalizePhone", () => {
+	it("adds +1 to a bare 10-digit US number", () => {
+		expect(normalizePhone("(555) 123-4567")).toBe("+15551234567");
+	});
+
+	it("accepts an 11-digit number already starting with 1", () => {
+		expect(normalizePhone("15551234567")).toBe("+15551234567");
+	});
+
+	it("keeps an already-E.164 international number", () => {
+		expect(normalizePhone("+442071838750")).toBe("+442071838750");
+	});
+
+	it("rejects numbers that are too short or malformed", () => {
+		expect(normalizePhone("12345")).toBeNull();
+		expect(normalizePhone("not a number")).toBeNull();
+		expect(normalizePhone(null)).toBeNull();
+		expect(normalizePhone(undefined)).toBeNull();
+	});
+});
+
+describe("parseCsvContacts", () => {
+	it("parses name, phone and consent columns", () => {
+		const csv = "name,phone,consent\nJordan Keane,555-123-4567,yes\nPriya Nandan,5551119999,no";
+		expect(parseCsvContacts(csv)).toEqual([
+			{ name: "Jordan Keane", phone: "+15551234567", consent: true },
+			{ name: "Priya Nandan", phone: "+15551119999", consent: false },
+		]);
+	});
+
+	it("drops rows with no resolvable phone number", () => {
+		const csv = "name,phone,consent\nNo Phone,,yes\nGood,5551234567,yes";
+		expect(parseCsvContacts(csv)).toEqual([{ name: "Good", phone: "+15551234567", consent: true }]);
+	});
+
+	it("treats a headerless file as one bare phone number per line", () => {
+		const csv = "5551234567\n5559876543";
+		expect(parseCsvContacts(csv)).toEqual([
+			{ name: null, phone: "+15551234567", consent: false },
+			{ name: null, phone: "+15559876543", consent: false },
+		]);
+	});
+
+	it("returns an empty array for empty input", () => {
+		expect(parseCsvContacts("")).toEqual([]);
+	});
+});
+
+describe("extractPhoneNumbersFromText", () => {
+	it("finds phone-shaped numbers in free text and dedupes them", () => {
+		const text = "Call Jordan at (555) 123-4567 or back line 555-123-4567. Also Priya 555 987 6543.";
+		const contacts = extractPhoneNumbersFromText(text);
+		expect(contacts).toEqual([
+			{ name: null, phone: "+15551234567", consent: false },
+			{ name: null, phone: "+15559876543", consent: false },
+		]);
+	});
+
+	it("returns an empty array when no phone numbers appear", () => {
+		expect(extractPhoneNumbersFromText("No numbers here at all.")).toEqual([]);
+	});
+});
+
+describe("isWithinCallingWindow", () => {
+	it("is true inside the window and false outside it", () => {
+		expect(isWithinCallingWindow(10, 9, 20)).toBe(true);
+		expect(isWithinCallingWindow(9, 9, 20)).toBe(true);
+		expect(isWithinCallingWindow(20, 9, 20)).toBe(false);
+		expect(isWithinCallingWindow(7, 9, 20)).toBe(false);
+	});
+});
+
+describe("filterDialable", () => {
+	const contacts = [
+		{ phone: "+1", consent: true, optedOut: false },
+		{ phone: "+2", consent: false, optedOut: false },
+		{ phone: "+3", consent: true, optedOut: true },
+		{ phone: "+4", consent: true, optedOut: false },
+	];
+
+	it("keeps only consented, non-opted-out, non-suppressed contacts", () => {
+		const result = filterDialable(contacts, new Set(["+4"]));
+		expect(result).toEqual([{ phone: "+1", consent: true, optedOut: false }]);
+	});
+
+	it("returns an empty array when nothing qualifies", () => {
+		expect(filterDialable(contacts, new Set(["+1", "+4"]))).toEqual([]);
+	});
+});
+
+describe("evaluateDialGate", () => {
+	const base = { consent: true, optedOut: false, phone: "+15551234567" };
+
+	it("allows a consented, non-suppressed contact inside the calling window", () => {
+		expect(evaluateDialGate(base, new Set(), 14, 9, 20)).toEqual({ allowed: true });
+	});
+
+	it("blocks a contact that hasn't consented", () => {
+		const result = evaluateDialGate({ ...base, consent: false }, new Set(), 14, 9, 20);
+		expect(result.allowed).toBe(false);
+		expect(result.reason).toMatch(/consent/);
+	});
+
+	it("blocks a contact that opted out", () => {
+		const result = evaluateDialGate({ ...base, optedOut: true }, new Set(), 14, 9, 20);
+		expect(result.allowed).toBe(false);
+		expect(result.reason).toMatch(/opted out/);
+	});
+
+	it("blocks a number on the suppression list", () => {
+		const result = evaluateDialGate(base, new Set([base.phone]), 14, 9, 20);
+		expect(result.allowed).toBe(false);
+		expect(result.reason).toMatch(/suppression/);
+	});
+
+	it("blocks dialing outside the calling-hours window", () => {
+		const result = evaluateDialGate(base, new Set(), 6, 9, 20);
+		expect(result.allowed).toBe(false);
+		expect(result.reason).toMatch(/calling window/);
+	});
+});
+
+describe("chunkScript", () => {
+	it("keeps a short script as a single chunk", () => {
+		expect(chunkScript("Hi there, quick call about your account.", 130)).toEqual([
+			"Hi there, quick call about your account.",
+		]);
+	});
+
+	it("splits a long script into multiple chunks without exceeding the byte limit", () => {
+		const script = Array(10).fill("word").join(" ").repeat(5);
+		const chunks = chunkScript(script, 20);
+		expect(chunks.length).toBeGreaterThan(1);
+		chunks.forEach((c) => {
+			expect(new TextEncoder().encode(c).length).toBeLessThanOrEqual(20);
+		});
+		expect(chunks.join(" ")).toBe(script);
+	});
+
+	it("returns an empty array for blank input", () => {
+		expect(chunkScript("   ", 130)).toEqual([]);
+	});
+});
+
+describe("buildCallSequenceDefinition", () => {
+	it("builds a greeting, say chunks, opt-out gather and two exits for a short script", () => {
+		const { definition, entryNodeId } = buildCallSequenceDefinition(
+			"Hi, this is a quick call about your account renewal.",
+			"9",
+		);
+		expect(entryNodeId).toBe("start");
+		const ids = definition.nodes.map((n) => n.id);
+		expect(ids).toEqual(["start", "greeting", "optout_gather", "exit_opt_out", "exit_done"]);
+
+		const gather = definition.nodes.find((n) => n.id === "optout_gather")!;
+		expect(gather.input.matches).toEqual({ opt_out: "9" });
+		expect(gather.connections.opt_out.node_id).toBe("exit_opt_out");
+		expect(gather.connections.timeout.node_id).toBe("exit_done");
+		expect(gather.connections.fallback.node_id).toBe("exit_done");
+	});
+
+	it("chains multiple say nodes for a longer script, each within the byte limit", () => {
+		const longScript = Array(60).fill("word").join(" ");
+		const { definition } = buildCallSequenceDefinition(longScript, "9");
+		const sayNodes = definition.nodes.filter((n) => n.type === "voice.say");
+		expect(sayNodes.length).toBeGreaterThan(1);
+		sayNodes.slice(1).forEach((n) => {
+			const text = n.input.text as string;
+			expect(new TextEncoder().encode(text).length).toBeLessThanOrEqual(MAX_SAY_BYTES);
+		});
+		// each say chains to the next, and the last one chains into the gather
+		for (let i = 0; i < sayNodes.length - 1; i++) {
+			expect(sayNodes[i].connections.next.node_id).toBe(sayNodes[i + 1].id);
+		}
+		expect(sayNodes[sayNodes.length - 1].connections.next.node_id).toBe("optout_gather");
+	});
+
+	it("throws ScriptTooLongError when the script needs more chunks than the node budget allows", () => {
+		const chunks = chunkScript(Array(400).fill("word").join(" "), MAX_SAY_BYTES);
+		expect(chunks.length).toBeGreaterThan(MAX_SCRIPT_CHUNKS);
+		const hugeScript = Array(400).fill("word").join(" ");
+		expect(() => buildCallSequenceDefinition(hugeScript, "9")).toThrow(ScriptTooLongError);
+	});
+
+	it("templates the first line with the recipient's name via trigger.data", () => {
+		const { definition } = buildCallSequenceDefinition("Following up on your order.", "9");
+		const greeting = definition.nodes.find((n) => n.id === "greeting")!;
+		expect(greeting.input.text).toMatchObject({
+			$template: expect.arrayContaining([expect.objectContaining({ $expr: expect.stringContaining("trigger.data.name") })]),
+		});
+	});
+
+	it("keeps the total node count within Bird's 16-node inline-run limit", () => {
+		const script = Array(9 * 15).fill("word").join(" "); // forces close to MAX_SCRIPT_CHUNKS chunks
+		const { definition } = buildCallSequenceDefinition(script, "9");
+		expect(definition.nodes.length).toBeLessThanOrEqual(16);
+	});
+});

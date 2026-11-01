@@ -5,8 +5,9 @@ import { BackgroundDots } from "./components/BackgroundDots";
 import { useWorkflowWebSocket } from "./hooks/useWorkflowWebSocket";
 import { WORKFLOW_STEPS } from "./types";
 import { CrmApp } from "./crm/CrmApp";
+import { ShaneApp } from "./shane/ShaneApp";
 
-type View = "workflow" | "crm";
+type View = "workflow" | "crm" | "shane";
 
 function App() {
 	const [view, setView] = useState<View>("workflow");
@@ -106,6 +107,16 @@ function App() {
 							>
 								CRM
 							</button>
+							<button
+								onClick={() => setView("shane")}
+								className={`px-2.5 py-1 text-xs font-medium rounded-sm transition-colors ${
+									view === "shane"
+										? "bg-neutral-900 text-white dark:bg-neutral-100 dark:text-neutral-900"
+										: "text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-200"
+								}`}
+							>
+								Shane AI
+							</button>
 						</nav>
 
 						<a
@@ -122,6 +133,8 @@ function App() {
 
 			{view === "crm" ? (
 				<CrmApp />
+			) : view === "shane" ? (
+				<ShaneApp />
 			) : (
 				/* Main content - unified canvas */
 				<main className="flex-1 flex flex-col lg:flex-row overflow-hidden relative z-10">
