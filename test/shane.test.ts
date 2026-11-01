@@ -195,3 +195,119 @@ describe("Shane AI API", () => {
 		expect(res.status).toBe(500);
 	});
 });
+
+/**
+ * Exercises the SMS campaign surface (worker/shane-sms-routes.ts).
+ * Unlike calling, Bird's SMS batch endpoint is itself a bulk primitive —
+ * so these tests cover the real "send to everyone eligible" path, not a
+ * one-at-a-time flow, while still proving eligibility is recomputed
+ * server-side rather than trusted from the client.
+ */
+describe("Shane AI SMS campaigns", () => {
+	beforeAll(() => {
+		const mutableEnv = env as unknown as { CALL_WINDOW_START: string; CALL_WINDOW_END: string };
+		mutableEnv.CALL_WINDOW_START = "0";
+		mutableEnv.CALL_WINDOW_END = "24";
+	});
+
+	beforeEach(async () => {
+		const contacts = (await (
+			await SELF.fetch("https://example.com/api/shane/contacts")
+		).json()) as Array<{ id: string }>;
+		for (const c of contacts) {
+			await SELF.fetch(`https://example.com/api/shane/contacts/${c.id}`, { method: "DELETE" });
+		}
+	});
+
+	it("gets and updates the campaign text message", async () => {
+		const current = (await (
+			await SELF.fetch("https://example.com/api/shane/text")
+		).json()) as { body: string };
+		expect(current.body.length).toBeGreaterThan(0);
+
+		const put = await SELF.fetch("https://example.com/api/shane/text", {
+			method: "PUT",
+			body: JSON.stringify({ body: "Hi {{name}}, test message." }),
+		});
+		expect(put.status).toBe(200);
+		expect((await put.json()) as { body: string }).toMatchObject({ body: "Hi {{name}}, test message." });
+	});
+
+	it("rejects an empty message body", async () => {
+		const res = await SELF.fetch("https://example.com/api/shane/text", {
+			method: "PUT",
+			body: JSON.stringify({ body: "   " }),
+		});
+		expect(res.status).toBe(400);
+	});
+
+	it("previews a campaign, separating eligible from excluded contacts", async () => {
+		await SELF.fetch("https://example.com/api/shane/contacts/import", {
+			method: "POST",
+			body: JSON.stringify({
+				contacts: [
+					{ name: "Consented", phone: "+15551110001", consent: true },
+					{ name: "NoConsent", phone: "+15551110002", consent: false },
+				],
+				source: "test",
+			}),
+		});
+
+		const res = await SELF.fetch("https://example.com/api/shane/campaign/preview", { method: "POST" });
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as {
+			eligibleCount: number;
+			excluded: Array<{ name: string; reason: string }>;
+			batchCount: number;
+		};
+		expect(body.eligibleCount).toBe(1);
+		expect(body.excluded).toHaveLength(1);
+		expect(body.excluded[0].name).toBe("NoConsent");
+		expect(body.excluded[0].reason).toMatch(/consent/);
+		expect(body.batchCount).toBe(1);
+	});
+
+	it("blocks sending when Bird SMS isn't configured, after confirming eligibility matched", async () => {
+		await SELF.fetch("https://example.com/api/shane/contacts/import", {
+			method: "POST",
+			body: JSON.stringify({ contacts: [{ name: "Jordan", phone: "+15552220001", consent: true }], source: "test" }),
+		});
+
+		const res = await SELF.fetch("https://example.com/api/shane/campaign/send", {
+			method: "POST",
+			body: JSON.stringify({ confirmCount: 1 }),
+		});
+		expect(res.status).toBe(501);
+		const body = (await res.json()) as { error: string };
+		expect(body.error).toMatch(/not configured|BIRD_API_KEY|SMS_FROM_SENDER/);
+	});
+
+	it("rejects sending when the confirmed count no longer matches eligible contacts", async () => {
+		await SELF.fetch("https://example.com/api/shane/contacts/import", {
+			method: "POST",
+			body: JSON.stringify({ contacts: [{ name: "Jordan", phone: "+15552220002", consent: true }], source: "test" }),
+		});
+
+		const res = await SELF.fetch("https://example.com/api/shane/campaign/send", {
+			method: "POST",
+			body: JSON.stringify({ confirmCount: 999 }),
+		});
+		expect(res.status).toBe(409);
+		const body = (await res.json()) as { error: string };
+		expect(body.error).toMatch(/changed/);
+	});
+
+	it("rejects sending when there are no eligible contacts at all", async () => {
+		const res = await SELF.fetch("https://example.com/api/shane/campaign/send", {
+			method: "POST",
+			body: JSON.stringify({ confirmCount: 0 }),
+		});
+		expect(res.status).toBe(400);
+	});
+
+	it("lists sms sends (empty before anything is sent)", async () => {
+		const res = await SELF.fetch("https://example.com/api/shane/campaign/sends");
+		expect(res.status).toBe(200);
+		expect(await res.json()).toEqual([]);
+	});
+});

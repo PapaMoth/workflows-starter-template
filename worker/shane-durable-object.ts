@@ -29,8 +29,23 @@ export interface Suppression {
 	createdAt: number;
 }
 
+export type SmsStatus = "sent" | "failed";
+
+export interface ShaneSmsSend {
+	id: string;
+	contactId: string;
+	status: SmsStatus;
+	birdMessageId: string | null;
+	segments: number | null;
+	outcome: string | null;
+	createdAt: number;
+}
+
 const DEFAULT_SCRIPT =
 	"Hi, this is Shane calling on behalf of our team. I'm following up about your recent interest — do you have a quick minute?";
+
+const DEFAULT_TEXT_MESSAGE =
+	"Hi {{name}}, this is Shane following up about your recent interest. Reply STOP to opt out.";
 
 /**
  * ShaneStoreDO - single-instance Durable Object holding Shane AI's state:
@@ -73,6 +88,20 @@ export class ShaneStoreDO extends DurableObject {
 					started_at INTEGER NOT NULL,
 					ended_at INTEGER
 				);
+				CREATE TABLE IF NOT EXISTS text_message (
+					id TEXT PRIMARY KEY DEFAULT 'current',
+					body TEXT NOT NULL,
+					updated_at INTEGER NOT NULL
+				);
+				CREATE TABLE IF NOT EXISTS sms_sends (
+					id TEXT PRIMARY KEY,
+					contact_id TEXT NOT NULL,
+					status TEXT NOT NULL,
+					bird_message_id TEXT,
+					segments INTEGER,
+					outcome TEXT,
+					created_at INTEGER NOT NULL
+				);
 			`);
 
 			const existing = this.ctx.storage.sql.exec("SELECT id FROM script WHERE id = 'current'").toArray();
@@ -80,6 +109,15 @@ export class ShaneStoreDO extends DurableObject {
 				this.ctx.storage.sql.exec(
 					"INSERT INTO script (id, body, updated_at) VALUES ('current', ?, ?)",
 					DEFAULT_SCRIPT,
+					Date.now(),
+				);
+			}
+
+			const existingText = this.ctx.storage.sql.exec("SELECT id FROM text_message WHERE id = 'current'").toArray();
+			if (existingText.length === 0) {
+				this.ctx.storage.sql.exec(
+					"INSERT INTO text_message (id, body, updated_at) VALUES ('current', ?, ?)",
+					DEFAULT_TEXT_MESSAGE,
 					Date.now(),
 				);
 			}
@@ -241,6 +279,60 @@ export class ShaneStoreDO extends DurableObject {
 				return String(r.phone);
 			});
 	}
+
+	// ---- Text message (SMS campaign body) ----
+
+	async getTextMessage(): Promise<{ body: string; updatedAt: number }> {
+		const row = this.ctx.storage.sql.exec("SELECT * FROM text_message WHERE id = 'current'").toArray()[0];
+		return { body: String(row.body), updatedAt: Number(row.updated_at) };
+	}
+
+	async setTextMessage(body: string): Promise<{ body: string; updatedAt: number }> {
+		const updatedAt = Date.now();
+		this.ctx.storage.sql.exec(
+			"UPDATE text_message SET body = ?, updated_at = ? WHERE id = 'current'",
+			body,
+			updatedAt,
+		);
+		return { body, updatedAt };
+	}
+
+	// ---- SMS send log ----
+
+	async listSmsSends(): Promise<ShaneSmsSend[]> {
+		return this.ctx.storage.sql
+			.exec("SELECT * FROM sms_sends ORDER BY created_at DESC")
+			.toArray()
+			.map(rowToSmsSend);
+	}
+
+	async recordSmsSends(
+		entries: Array<{
+			contactId: string;
+			status: SmsStatus;
+			birdMessageId: string | null;
+			segments: number | null;
+			outcome: string | null;
+		}>,
+	): Promise<ShaneSmsSend[]> {
+		const createdAt = Date.now();
+		const results: ShaneSmsSend[] = [];
+		for (const entry of entries) {
+			const id = crypto.randomUUID();
+			this.ctx.storage.sql.exec(
+				"INSERT INTO sms_sends (id, contact_id, status, bird_message_id, segments, outcome, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+				id,
+				entry.contactId,
+				entry.status,
+				entry.birdMessageId,
+				entry.segments,
+				entry.outcome,
+				createdAt,
+			);
+			results.push({ id, createdAt, ...entry });
+		}
+		return results;
+	}
 }
 
 function rowToContact(row: Record<string, unknown>): ShaneContact {
@@ -251,6 +343,18 @@ function rowToContact(row: Record<string, unknown>): ShaneContact {
 		consent: Number(row.consent) === 1,
 		optedOut: Number(row.opted_out) === 1,
 		source: row.source == null ? null : String(row.source),
+		createdAt: Number(row.created_at),
+	};
+}
+
+function rowToSmsSend(row: Record<string, unknown>): ShaneSmsSend {
+	return {
+		id: String(row.id),
+		contactId: String(row.contact_id),
+		status: String(row.status) as SmsStatus,
+		birdMessageId: row.bird_message_id == null ? null : String(row.bird_message_id),
+		segments: row.segments == null ? null : Number(row.segments),
+		outcome: row.outcome == null ? null : String(row.outcome),
 		createdAt: Number(row.created_at),
 	};
 }

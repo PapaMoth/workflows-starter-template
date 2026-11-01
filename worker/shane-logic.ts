@@ -327,3 +327,113 @@ export function buildCallSequenceDefinition(
 		entryNodeId: "start",
 	};
 }
+
+// ---------------------------------------------------------------------------
+// SMS campaigns
+//
+// Unlike Voice (one human-confirmed call at a time), Bird's SMS batch
+// endpoint (POST /v1/sms/batches) is itself designed for sending many
+// messages in one request, up to 100 per batch. Building a real "send to
+// everyone eligible" action here matches that primitive rather than
+// fighting it — the safety rail is the eligibility gate (same consent /
+// opt-out / suppression / quiet-hours check as calling) plus a server-side
+// recount the caller must confirm, not an artificial one-at-a-time limit.
+// ---------------------------------------------------------------------------
+
+/** Bird accepts at most this many messages per POST /v1/sms/batches request. */
+export const MAX_SMS_BATCH_SIZE = 100;
+
+/** Bird rejects free-text SMS bodies needing more than this many segments. */
+export const MAX_SMS_SEGMENTS = 12;
+
+const SMS_GSM7_SINGLE = 160;
+const SMS_GSM7_CONCAT = 153;
+const SMS_UCS2_SINGLE = 70;
+const SMS_UCS2_CONCAT = 67;
+
+/** True when every character fits the GSM-7 default alphabet closely enough to treat as GSM-7 for sizing. */
+function isLikelyGsm7(text: string): boolean {
+	// eslint-disable-next-line no-control-regex -- deliberately matching the basic Latin/ASCII range GSM-7 covers.
+	return /^[\x00-\x7F]*$/.test(text);
+}
+
+/**
+ * Estimates the SMS segment count for a message body. GSM-7 fits more
+ * characters per segment than UCS-2 (needed once any character falls
+ * outside the GSM-7 alphabet, e.g. most emoji or non-Latin scripts).
+ * This is an estimate for UI display and the pre-send length check, not
+ * a byte-exact carrier calculation.
+ */
+export function estimateSmsSegments(text: string): number {
+	if (text.length === 0) return 1;
+	const gsm7 = isLikelyGsm7(text);
+	const singleCap = gsm7 ? SMS_GSM7_SINGLE : SMS_UCS2_SINGLE;
+	const concatCap = gsm7 ? SMS_GSM7_CONCAT : SMS_UCS2_CONCAT;
+	if (text.length <= singleCap) return 1;
+	return Math.ceil(text.length / concatCap);
+}
+
+export class MessageTooLongError extends Error {
+	constructor(segments: number) {
+		super(
+			`Message needs ${segments} SMS segments, which exceeds Bird's ${MAX_SMS_SEGMENTS}-segment cap. Shorten the message.`,
+		);
+		this.name = "MessageTooLongError";
+	}
+}
+
+/** Replaces {{name}} with the contact's name, or "there" when none is known. */
+export function renderMessage(template: string, contact: { name: string | null }): string {
+	return template.replace(/\{\{\s*name\s*\}\}/gi, contact.name || "there");
+}
+
+/**
+ * Appends a STOP reminder when the message doesn't already mention one.
+ * CTIA guidance expects opt-out instructions in marketing SMS; this keeps
+ * that from depending on the operator remembering to type it.
+ */
+export function ensureOptOutLine(text: string): string {
+	if (/\bstop\b/i.test(text)) return text;
+	const trimmed = text.trim();
+	const needsSpace = trimmed.length > 0 && !/[.!?]$/.test(trimmed);
+	return trimmed + (needsSpace ? "." : "") + " Reply STOP to opt out.";
+}
+
+/** Splits a list into chunks of at most `size`, for Bird's per-batch cap. */
+export function chunkIntoBatches<T>(items: T[], size: number): T[][] {
+	const batches: T[][] = [];
+	for (let i = 0; i < items.length; i += size) {
+		batches.push(items.slice(i, i + size));
+	}
+	return batches;
+}
+
+export interface SmsBatchItem {
+	to: string;
+	from: string;
+	category: "marketing";
+	text: string;
+}
+
+/**
+ * Builds the per-recipient SMS payloads for POST /v1/sms/batches: the
+ * message template rendered with each contact's name, with a STOP
+ * reminder guaranteed present. Throws MessageTooLongError up front if the
+ * rendered text would blow Bird's segment cap for any contact that has a
+ * name (the longest realistic rendering), so a bad template fails before
+ * any network call rather than mid-batch.
+ */
+export function buildSmsBatchItems(
+	contacts: Array<{ phone: string; name: string | null }>,
+	template: string,
+	fromSender: string,
+): SmsBatchItem[] {
+	return contacts.map(function (contact) {
+		const rendered = ensureOptOutLine(renderMessage(template, contact));
+		const segments = estimateSmsSegments(rendered);
+		if (segments > MAX_SMS_SEGMENTS) {
+			throw new MessageTooLongError(segments);
+		}
+		return { to: contact.phone, from: fromSender, category: "marketing", text: rendered };
+	});
+}

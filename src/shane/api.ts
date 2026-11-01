@@ -1,4 +1,12 @@
-import type { ParsedContact, ShaneCall, ShaneContact, Suppression } from "./types";
+import type {
+	CampaignPreview,
+	CampaignSendResult,
+	ParsedContact,
+	ShaneCall,
+	ShaneContact,
+	ShaneSmsSend,
+	Suppression,
+} from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
 	const res = await fetch(`/api/shane${path}`, {
@@ -45,4 +53,13 @@ export const shaneApi = {
 	listCalls: () => request<ShaneCall[]>("/calls"),
 	dial: (contactId: string) =>
 		request<ShaneCall>("/calls/dial", { method: "POST", body: JSON.stringify({ contactId }) }),
+
+	getTextMessage: () => request<{ body: string; updatedAt: number }>("/text"),
+	setTextMessage: (body: string) =>
+		request<{ body: string; updatedAt: number }>("/text", { method: "PUT", body: JSON.stringify({ body }) }),
+
+	previewCampaign: () => request<CampaignPreview>("/campaign/preview", { method: "POST" }),
+	sendCampaign: (confirmCount: number) =>
+		request<CampaignSendResult>("/campaign/send", { method: "POST", body: JSON.stringify({ confirmCount }) }),
+	listSmsSends: () => request<ShaneSmsSend[]>("/campaign/sends"),
 };

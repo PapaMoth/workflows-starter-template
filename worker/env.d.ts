@@ -7,5 +7,6 @@ declare global {
 	interface Env {
 		BIRD_API_KEY?: string;
 		BIRD_FROM_NUMBER?: string;
+		SMS_FROM_SENDER?: string;
 	}
 }

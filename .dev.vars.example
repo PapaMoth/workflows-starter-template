@@ -3,8 +3,13 @@
 # never commit real values.
 
 # Bird workspace API key (bk_us1_... or bk_eu1_...), scoped to voice
-# calling + voice management write. https://bird.com/docs/guides/authentication
+# calling + voice management write, and SMS sending.
+# https://bird.com/docs/guides/authentication
 BIRD_API_KEY=
 
 # A calling number your Bird workspace is permitted to present (E.164).
 BIRD_FROM_NUMBER=
+
+# An SMS sender your Bird workspace holds: a number in E.164, a short
+# code, or a claimed alphanumeric sender ID.
+SMS_FROM_SENDER=

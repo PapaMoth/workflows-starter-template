@@ -5,6 +5,7 @@ import {
 	parseCsvContacts,
 	ScriptTooLongError,
 } from "./shane-logic";
+import { handleShaneCampaignRequest, handleShaneTextRequest } from "./shane-sms-routes";
 
 /**
  * REST routing for /api/shane/* — manages Shane AI's script, contacts,
@@ -45,6 +46,14 @@ export async function handleShaneRequest(request: Request, env: Env): Promise<Re
 	const store = getStore(env);
 
 	try {
+		if (section === "text") {
+			return await handleShaneTextRequest(request, env);
+		}
+
+		if (section === "campaign") {
+			return await handleShaneCampaignRequest(request, env, parts[3]);
+		}
+
 		if (section === "script") {
 			if (request.method === "GET") return Response.json(await store.getScript());
 			if (request.method === "PUT") {

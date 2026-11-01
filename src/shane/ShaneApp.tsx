@@ -3,18 +3,22 @@ import { shaneApi } from "./api";
 import {
 	MAX_SAY_BYTES,
 	MAX_SCRIPT_CHUNKS,
+	MAX_SMS_SEGMENTS,
+	type CampaignPreview,
 	type ParsedContact,
 	type ShaneCall,
 	type ShaneContact,
+	type ShaneSmsSend,
 	type Suppression,
 } from "./types";
 
-type Tab = "script" | "contacts" | "calls";
+type Tab = "script" | "text" | "contacts" | "calls";
 
 const TABS: { id: Tab; label: string }[] = [
-	{ id: "script", label: "Script" },
+	{ id: "script", label: "Call script" },
+	{ id: "text", label: "Text campaign" },
 	{ id: "contacts", label: "Contacts" },
-	{ id: "calls", label: "Calls" },
+	{ id: "calls", label: "Call log" },
 ];
 
 const inputClass =
@@ -36,9 +40,9 @@ export function ShaneApp() {
 		<div className="flex-1 flex flex-col overflow-hidden px-6 pb-6 gap-4">
 			<div className="flex items-start gap-2 rounded-md bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900 text-amber-800 dark:text-amber-300 text-xs px-3 py-2">
 				<span>
-					Shane AI reads your script aloud over a real phone call and offers a keypad opt-out. It does not hold a live
-					two-way conversation. Only dial contacts who have actually consented to be called — each dial is a real,
-					billable call placed one contact at a time.
+					Calls read your script aloud and offer a keypad opt-out — not a live two-way conversation — and are placed
+					one contact at a time. Text campaigns send via Bird's SMS batch API to every consented, non-suppressed
+					contact at once. Either way, only reach out to contacts who have actually consented to being contacted.
 				</span>
 			</div>
 
@@ -66,6 +70,7 @@ export function ShaneApp() {
 
 			<div className="flex-1 overflow-y-auto">
 				{tab === "script" && <ScriptTab onError={setError} />}
+				{tab === "text" && <TextCampaignTab onError={setError} />}
 				{tab === "contacts" && <ContactsTab onError={setError} />}
 				{tab === "calls" && <CallsTab onError={setError} />}
 			</div>
@@ -135,6 +140,187 @@ function ScriptTab({ onError }: { onError: (e: string | null) => void }) {
 			<button className={buttonClass} onClick={save} disabled={saving || !body.trim()}>
 				Save script
 			</button>
+		</div>
+	);
+}
+
+// ---------------------------------------------------------------------------
+// Text campaign (message editor + eligibility preview + mass send)
+// ---------------------------------------------------------------------------
+
+function TextCampaignTab({ onError }: { onError: (e: string | null) => void }) {
+	const [body, setBody] = useState("");
+	const [loaded, setLoaded] = useState(false);
+	const [saving, setSaving] = useState(false);
+	const [savedAt, setSavedAt] = useState<number | null>(null);
+	const [preview, setPreview] = useState<CampaignPreview | null>(null);
+	const [previewing, setPreviewing] = useState(false);
+	const [confirmText, setConfirmText] = useState("");
+	const [sending, setSending] = useState(false);
+	const [result, setResult] = useState<{ sent: number; failed: number } | null>(null);
+	const [recentSends, setRecentSends] = useState<ShaneSmsSend[]>([]);
+
+	useEffect(() => {
+		shaneApi
+			.getTextMessage()
+			.then((m) => {
+				setBody(m.body);
+				setLoaded(true);
+			})
+			.catch((e) => onError(e.message));
+	}, [onError]);
+
+	const estimatedSegments = Math.max(1, Math.ceil(approxByteLen(body) / 150));
+	const tooLong = estimatedSegments > MAX_SMS_SEGMENTS;
+
+	const save = async () => {
+		setSaving(true);
+		onError(null);
+		setPreview(null);
+		try {
+			const saved = await shaneApi.setTextMessage(body);
+			setSavedAt(saved.updatedAt);
+		} catch (e) {
+			onError(e instanceof Error ? e.message : "Failed to save message");
+		} finally {
+			setSaving(false);
+		}
+	};
+
+	const runPreview = async () => {
+		setPreviewing(true);
+		onError(null);
+		setResult(null);
+		setConfirmText("");
+		try {
+			setPreview(await shaneApi.previewCampaign());
+		} catch (e) {
+			onError(e instanceof Error ? e.message : "Failed to preview campaign");
+		} finally {
+			setPreviewing(false);
+		}
+	};
+
+	const send = async () => {
+		if (!preview) return;
+		setSending(true);
+		onError(null);
+		try {
+			const sendResult = await shaneApi.sendCampaign(preview.eligibleCount);
+			setResult({ sent: sendResult.sent, failed: sendResult.failed });
+			setPreview(null);
+			setConfirmText("");
+			setRecentSends((await shaneApi.listSmsSends()).slice(0, 10));
+		} catch (e) {
+			onError(e instanceof Error ? e.message : "Failed to send campaign");
+		} finally {
+			setSending(false);
+		}
+	};
+
+	if (!loaded) return <div className="text-sm text-neutral-500">Loading message…</div>;
+
+	const confirmMatches = preview !== null && confirmText.trim() === String(preview.eligibleCount);
+
+	return (
+		<div className="space-y-4 max-w-2xl">
+			<div>
+				<h2 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100">Campaign text message</h2>
+				<p className="text-xs text-neutral-500 mt-1">
+					Sent via Bird's SMS batch API to every consented, non-suppressed contact in your calling-hours window.
+					Use <code>{"{{name}}"}</code> to personalize. A "Reply STOP to opt out" line is added automatically if
+					you don't include one.
+				</p>
+			</div>
+			<textarea
+				className={`${inputClass} w-full`}
+				style={{ minHeight: 120 }}
+				value={body}
+				onChange={(e) => {
+					setBody(e.target.value);
+					setPreview(null);
+				}}
+			/>
+			<div className="flex items-center justify-between text-xs text-neutral-500">
+				<span className={tooLong ? "text-red-600 dark:text-red-400 font-medium" : ""}>
+					~{estimatedSegments} SMS segment{estimatedSegments === 1 ? "" : "s"} (max {MAX_SMS_SEGMENTS})
+					{tooLong ? " — shorten the message before sending" : ""}
+				</span>
+				{savedAt && <span>Saved {new Date(savedAt).toLocaleTimeString()}</span>}
+			</div>
+			<button className={buttonClass} onClick={save} disabled={saving || !body.trim()}>
+				Save message
+			</button>
+
+			<div className="border-t border-neutral-200 dark:border-neutral-800 pt-4 space-y-3">
+				<button className={ghostButtonClass} onClick={runPreview} disabled={previewing}>
+					{previewing ? "Checking…" : "Preview who this will reach"}
+				</button>
+
+				{preview && (
+					<div className="rounded-lg border border-neutral-200 dark:border-neutral-800 p-4 space-y-3">
+						<p className="text-sm text-neutral-900 dark:text-neutral-100">
+							<strong>{preview.eligibleCount}</strong> contact{preview.eligibleCount === 1 ? "" : "s"} will receive
+							this text, in {preview.batchCount} batch{preview.batchCount === 1 ? "" : "es"}.
+							{preview.excluded.length > 0 && (
+								<> {preview.excluded.length} excluded (no consent, opted out, suppressed, or outside hours).</>
+							)}
+						</p>
+						{preview.tooLong && (
+							<p className="text-sm text-red-600 dark:text-red-400">
+								This message renders to more than {MAX_SMS_SEGMENTS} segments for some contacts — shorten it
+								before sending.
+							</p>
+						)}
+						{preview.excluded.length > 0 && (
+							<details className="text-xs text-neutral-500">
+								<summary className="cursor-pointer">Show excluded contacts</summary>
+								<ul className="mt-2 space-y-1">
+									{preview.excluded.map((e) => (
+										<li key={e.id}>
+											{e.name || e.phone} — {e.reason}
+										</li>
+									))}
+								</ul>
+							</details>
+						)}
+						{preview.eligibleCount > 0 && !preview.tooLong && (
+							<div className="space-y-2">
+								<label className="block text-xs text-neutral-600 dark:text-neutral-400">
+									Type <strong>{preview.eligibleCount}</strong> to confirm you want to text that many people
+									right now:
+									<input
+										className={`${inputClass} mt-1 w-32`}
+										value={confirmText}
+										onChange={(e) => setConfirmText(e.target.value)}
+										inputMode="numeric"
+									/>
+								</label>
+								<button className={buttonClass} disabled={!confirmMatches || sending} onClick={send}>
+									{sending ? "Sending…" : `Send to ${preview.eligibleCount} contact${preview.eligibleCount === 1 ? "" : "s"}`}
+								</button>
+							</div>
+						)}
+					</div>
+				)}
+
+				{result && (
+					<div className="rounded-md bg-green-50 dark:bg-green-950/30 border border-green-200 dark:border-green-900 text-green-700 dark:text-green-300 text-sm px-3 py-2">
+						Sent {result.sent}, failed {result.failed}.
+					</div>
+				)}
+
+				{recentSends.length > 0 && (
+					<ul className="text-xs text-neutral-500 space-y-0.5">
+						{recentSends.map((s) => (
+							<li key={s.id}>
+								{new Date(s.createdAt).toLocaleTimeString()} — {s.status}
+								{s.outcome ? `: ${s.outcome}` : ""}
+							</li>
+						))}
+					</ul>
+				)}
+			</div>
 		</div>
 	);
 }

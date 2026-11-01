@@ -11,6 +11,13 @@ import {
 	ScriptTooLongError,
 	MAX_SAY_BYTES,
 	MAX_SCRIPT_CHUNKS,
+	estimateSmsSegments,
+	renderMessage,
+	ensureOptOutLine,
+	chunkIntoBatches,
+	buildSmsBatchItems,
+	MessageTooLongError,
+	MAX_SMS_BATCH_SIZE,
 } from "../worker/shane-logic";
 
 describe("normalizePhone", () => {
@@ -209,5 +216,116 @@ describe("buildCallSequenceDefinition", () => {
 		const script = Array(9 * 15).fill("word").join(" "); // forces close to MAX_SCRIPT_CHUNKS chunks
 		const { definition } = buildCallSequenceDefinition(script, "9");
 		expect(definition.nodes.length).toBeLessThanOrEqual(16);
+	});
+});
+
+describe("estimateSmsSegments", () => {
+	it("counts a short plain-ASCII message as one segment", () => {
+		expect(estimateSmsSegments("Hi there, quick update for you.")).toBe(1);
+	});
+
+	it("counts exactly at the single-segment boundary as one segment", () => {
+		expect(estimateSmsSegments("a".repeat(160))).toBe(1);
+	});
+
+	it("splits a long plain-ASCII message into multiple concatenated segments", () => {
+		expect(estimateSmsSegments("a".repeat(161))).toBe(2);
+		expect(estimateSmsSegments("a".repeat(153 * 2 + 1))).toBe(3);
+	});
+
+	it("uses the tighter UCS-2 caps once any character falls outside GSM-7", () => {
+		expect(estimateSmsSegments("a".repeat(70))).toBe(1);
+		expect(estimateSmsSegments("é" + "a".repeat(70))).toBe(2);
+	});
+
+	it("treats an empty message as one segment", () => {
+		expect(estimateSmsSegments("")).toBe(1);
+	});
+});
+
+describe("renderMessage", () => {
+	it("substitutes {{name}} with the contact's name", () => {
+		expect(renderMessage("Hi {{name}}, following up!", { name: "Priya" })).toBe("Hi Priya, following up!");
+	});
+
+	it("falls back to 'there' when the contact has no name", () => {
+		expect(renderMessage("Hi {{name}}!", { name: null })).toBe("Hi there!");
+	});
+
+	it("is case-insensitive and tolerates internal spacing", () => {
+		expect(renderMessage("Hey {{ Name }}", { name: "Jordan" })).toBe("Hey Jordan");
+	});
+
+	it("leaves a template with no placeholder unchanged", () => {
+		expect(renderMessage("Hello there", { name: "Jordan" })).toBe("Hello there");
+	});
+});
+
+describe("ensureOptOutLine", () => {
+	it("appends a STOP reminder when the message doesn't mention one", () => {
+		expect(ensureOptOutLine("Thanks for your interest")).toBe("Thanks for your interest. Reply STOP to opt out.");
+	});
+
+	it("doesn't duplicate an existing STOP mention", () => {
+		expect(ensureOptOutLine("Reply STOP anytime to unsubscribe.")).toBe("Reply STOP anytime to unsubscribe.");
+	});
+
+	it("doesn't add a redundant period after existing punctuation", () => {
+		expect(ensureOptOutLine("Thanks!")).toBe("Thanks! Reply STOP to opt out.");
+	});
+});
+
+describe("chunkIntoBatches", () => {
+	it("splits items into batches no larger than the given size", () => {
+		const items = Array.from({ length: 250 }, (_, i) => i);
+		const batches = chunkIntoBatches(items, MAX_SMS_BATCH_SIZE);
+		expect(batches.map((b) => b.length)).toEqual([100, 100, 50]);
+		expect(batches.flat()).toEqual(items);
+	});
+
+	it("returns a single batch when everything fits", () => {
+		expect(chunkIntoBatches([1, 2, 3], 100)).toEqual([[1, 2, 3]]);
+	});
+
+	it("returns no batches for an empty list", () => {
+		expect(chunkIntoBatches([], 100)).toEqual([]);
+	});
+});
+
+describe("buildSmsBatchItems", () => {
+	it("builds one batch item per contact, templated and with an opt-out line", () => {
+		const items = buildSmsBatchItems(
+			[{ phone: "+15551234567", name: "Jordan" }],
+			"Hi {{name}}, we have an update for you.",
+			"+15557654321",
+		);
+		expect(items).toEqual([
+			{
+				to: "+15551234567",
+				from: "+15557654321",
+				category: "marketing",
+				text: "Hi Jordan, we have an update for you. Reply STOP to opt out.",
+			},
+		]);
+	});
+
+	it("renders a different message per contact from the same template", () => {
+		const items = buildSmsBatchItems(
+			[
+				{ phone: "+1", name: "Alex" },
+				{ phone: "+2", name: null },
+			],
+			"Hi {{name}}!",
+			"+1555000",
+		);
+		expect(items[0].text).toContain("Alex");
+		expect(items[1].text).toContain("there");
+	});
+
+	it("throws MessageTooLongError before returning anything if the template is too long", () => {
+		const hugeTemplate = "a".repeat(2000);
+		expect(() => buildSmsBatchItems([{ phone: "+1", name: null }], hugeTemplate, "+1555000")).toThrow(
+			MessageTooLongError,
+		);
 	});
 });
