@@ -1,6 +1,9 @@
 // Export the Workflow and Durable Object classes
 export { MyWorkflow } from "./workflow";
 export { WorkflowStatusDO } from "./durable-object";
+export { CrmStoreDO } from "./crm-durable-object";
+
+import { handleCrmRequest } from "./crm-routes";
 
 /**
  * Main Worker fetch handler
@@ -14,6 +17,11 @@ export { WorkflowStatusDO } from "./durable-object";
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
 		const url = new URL(request.url);
+
+		// API: CRM resource routes (contacts, companies, deals, tasks, notes)
+		if (url.pathname.startsWith("/api/crm/")) {
+			return handleCrmRequest(request, env);
+		}
 
 		// API: Start a new workflow instance
 		if (url.pathname === "/api/workflow/start" && request.method === "POST") {

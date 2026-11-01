@@ -4,8 +4,12 @@ import { CodeDisplay } from "./components/CodeDisplay";
 import { BackgroundDots } from "./components/BackgroundDots";
 import { useWorkflowWebSocket } from "./hooks/useWorkflowWebSocket";
 import { WORKFLOW_STEPS } from "./types";
+import { CrmApp } from "./crm/CrmApp";
+
+type View = "workflow" | "crm";
 
 function App() {
+	const [view, setView] = useState<View>("workflow");
 	const [instanceId, setInstanceId] = useState<string | null>(null);
 	const [isStarting, setIsStarting] = useState(false);
 	const workflowState = useWorkflowWebSocket(instanceId);
@@ -80,42 +84,71 @@ function App() {
 						</h1>
 					</div>
 
-					<a
-						href="https://developers.cloudflare.com/workflows"
-						target="_blank"
-						rel="noopener noreferrer"
-						className="text-xs font-medium text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-200 transition-colors"
-					>
-						Documentation →
-					</a>
+					<div className="flex items-center gap-4">
+						<nav className="flex gap-1 rounded-md border border-neutral-200 dark:border-neutral-800 p-0.5">
+							<button
+								onClick={() => setView("workflow")}
+								className={`px-2.5 py-1 text-xs font-medium rounded-sm transition-colors ${
+									view === "workflow"
+										? "bg-neutral-900 text-white dark:bg-neutral-100 dark:text-neutral-900"
+										: "text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-200"
+								}`}
+							>
+								Workflow demo
+							</button>
+							<button
+								onClick={() => setView("crm")}
+								className={`px-2.5 py-1 text-xs font-medium rounded-sm transition-colors ${
+									view === "crm"
+										? "bg-neutral-900 text-white dark:bg-neutral-100 dark:text-neutral-900"
+										: "text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-200"
+								}`}
+							>
+								CRM
+							</button>
+						</nav>
+
+						<a
+							href="https://developers.cloudflare.com/workflows"
+							target="_blank"
+							rel="noopener noreferrer"
+							className="text-xs font-medium text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-200 transition-colors"
+						>
+							Documentation →
+						</a>
+					</div>
 				</div>
 			</header>
 
-			{/* Main content - unified canvas */}
-			<main className="flex-1 flex flex-col lg:flex-row overflow-hidden relative z-10">
-				{/* Left side - Code (responsive width) */}
-				<div className="w-full lg:w-[60%] overflow-hidden px-6 pb-6">
-					<CodeDisplay
-						currentStep={workflowState.currentStep}
-						workflowStatus={workflowState.workflowStatus}
-						onStartWorkflow={handleStartWorkflow}
-						isStarting={isStarting}
-					/>
-				</div>
+			{view === "crm" ? (
+				<CrmApp />
+			) : (
+				/* Main content - unified canvas */
+				<main className="flex-1 flex flex-col lg:flex-row overflow-hidden relative z-10">
+					{/* Left side - Code (responsive width) */}
+					<div className="w-full lg:w-[60%] overflow-hidden px-6 pb-6">
+						<CodeDisplay
+							currentStep={workflowState.currentStep}
+							workflowStatus={workflowState.workflowStatus}
+							onStartWorkflow={handleStartWorkflow}
+							isStarting={isStarting}
+						/>
+					</div>
 
-				{/* Right side - Diagram (responsive width) */}
-				<div className="flex-1 overflow-hidden px-6 lg:pl-8 lg:pr-6 pb-6">
-					<WorkflowDiagram
-						steps={WORKFLOW_STEPS}
-						stepStatuses={workflowState.stepStatuses}
-						currentStep={workflowState.currentStep}
-						instanceId={instanceId}
-						workflowStatus={workflowState.workflowStatus}
-						onStartWorkflow={handleStartWorkflow}
-						isStarting={isStarting}
-					/>
-				</div>
-			</main>
+					{/* Right side - Diagram (responsive width) */}
+					<div className="flex-1 overflow-hidden px-6 lg:pl-8 lg:pr-6 pb-6">
+						<WorkflowDiagram
+							steps={WORKFLOW_STEPS}
+							stepStatuses={workflowState.stepStatuses}
+							currentStep={workflowState.currentStep}
+							instanceId={instanceId}
+							workflowStatus={workflowState.workflowStatus}
+							onStartWorkflow={handleStartWorkflow}
+							isStarting={isStarting}
+						/>
+					</div>
+				</main>
+			)}
 		</div>
 	);
 }
