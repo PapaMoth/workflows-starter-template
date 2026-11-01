@@ -415,6 +415,229 @@ export interface SmsBatchItem {
 	text: string;
 }
 
+// ---------------------------------------------------------------------------
+// Inbound call screening
+//
+// Bird's Voice Sequence API only documents voice.say (text + a language
+// code — no voice selection, no custom or cloned voice) and voice.gather
+// (keypad digits only — no speech recognition). So "answers questions the
+// caller asks" here means a keypad-driven FAQ menu, not free-form spoken
+// understanding, and the voice is whichever Bird speaks that language in,
+// not a chosen or cloned voice. A real conversational, custom-voice
+// answering system needs a separate SIP-connected AI voice runtime (see
+// Bird's "Connect an AI voice application" guide) — a materially bigger
+// integration than this sequence builder.
+//
+// This also runs as a PUBLISHED sequence bound to an inbound number in
+// Bird's dashboard, not an inline per-call definition like outbound
+// dialing: Bird's publish/versioning flow for saved sequences isn't a
+// documented REST API, so the operator pastes this definition into the
+// Bird dashboard's sequence editor and binds their inbound number to it
+// there.
+// ---------------------------------------------------------------------------
+
+export interface FaqEntry {
+	label: string;
+	answer: string;
+}
+
+/** Greeting may use at most this many chained voice.say nodes (keeps the definition well under Bird's 16-node cap). */
+export const MAX_GREETING_CHUNKS = 2;
+
+/** At most this many FAQ menu options — digits 1-5; 0 is reserved for "talk to a live agent". */
+export const MAX_FAQ_ENTRIES = 5;
+
+/** A gather may play at most 4 prompts, so the spoken menu can span at most this many. */
+export const MAX_MENU_PROMPTS = 4;
+
+export class ScreeningTooComplexError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "ScreeningTooComplexError";
+	}
+}
+
+function buildMenuAnnouncement(faqs: FaqEntry[]): string {
+	const options = faqs.map((faq, i) => `Press ${i + 1} for ${faq.label}.`).join(" ");
+	return `${options} Press 0 to speak with a live agent.`;
+}
+
+/**
+ * Builds a published-sequence definition that greets the caller, offers a
+ * keypad menu of FAQ answers plus "talk to a live agent", speaks the
+ * selected answer, then offers the live-agent transfer again before
+ * ending the call. Forwards to the agent on an explicit "0" at either
+ * menu, or when the caller doesn't make a clear choice at all (silence,
+ * an unmapped key) — the safer default when intent is unclear.
+ */
+export function buildScreeningSequenceDefinition(
+	greeting: string,
+	faqs: FaqEntry[],
+	agentNumber: string,
+): { definition: SequenceDefinition; entryNodeId: string } {
+	if (faqs.length > MAX_FAQ_ENTRIES) {
+		throw new ScreeningTooComplexError(
+			`${faqs.length} FAQ entries exceeds the ${MAX_FAQ_ENTRIES} this tool allows (digits 1-${MAX_FAQ_ENTRIES}; 0 is reserved for the live agent).`,
+		);
+	}
+
+	const greetingChunks = chunkScript(greeting, MAX_SAY_BYTES);
+	if (greetingChunks.length > MAX_GREETING_CHUNKS) {
+		throw new ScreeningTooComplexError(
+			`Greeting needs ${greetingChunks.length} say-steps, which exceeds the ${MAX_GREETING_CHUNKS} this tool allows. Shorten it.`,
+		);
+	}
+
+	faqs.forEach((faq, i) => {
+		if (byteLen(faq.answer) > MAX_SAY_BYTES) {
+			throw new ScreeningTooComplexError(
+				`FAQ #${i + 1} ("${faq.label}")'s answer is too long for one spoken segment (max ~${MAX_SAY_BYTES} bytes). Shorten it.`,
+			);
+		}
+	});
+
+	const menuPromptChunks = chunkScript(buildMenuAnnouncement(faqs), MAX_SAY_BYTES);
+	if (menuPromptChunks.length > MAX_MENU_PROMPTS) {
+		throw new ScreeningTooComplexError(
+			`The menu announcement needs ${menuPromptChunks.length} prompts, which exceeds Bird's ${MAX_MENU_PROMPTS}-prompt gather limit. Use fewer or shorter FAQ labels.`,
+		);
+	}
+
+	const nodes: SequenceNode[] = [];
+	const greetingIds = (greetingChunks.length === 0 ? [""] : greetingChunks).map((_, i) =>
+		i === 0 ? "greeting" : "greeting_" + i,
+	);
+	const effectiveGreetingChunks = greetingChunks.length === 0 ? [""] : greetingChunks;
+
+	nodes.push({
+		id: "start",
+		type: "trigger.start_call",
+		type_version: 1,
+		config: { data_schema: { type: "object", properties: {} } },
+		input: {},
+		connections: { event: { node_id: greetingIds[0], port: "input" } },
+	});
+
+	effectiveGreetingChunks.forEach((chunk, i) => {
+		const nextId = i + 1 < greetingIds.length ? greetingIds[i + 1] : "main_menu";
+		nodes.push({
+			id: greetingIds[i],
+			type: "voice.say",
+			type_version: 1,
+			config: {},
+			input: { text: chunk, language: "en" },
+			connections: { next: { node_id: nextId, port: "input" } },
+		});
+	});
+
+	const menuConnections: Record<string, { node_id: string; port: string }> = {
+		talk_to_agent: { node_id: "agent_dial", port: "input" },
+		timeout: { node_id: "agent_dial", port: "input" },
+		fallback: { node_id: "agent_dial", port: "input" },
+	};
+	faqs.forEach((_, i) => {
+		menuConnections["faq_" + i] = { node_id: "faq_say_" + i, port: "input" };
+	});
+
+	nodes.push({
+		id: "main_menu",
+		type: "voice.gather",
+		type_version: 1,
+		config: {},
+		input: {
+			prompts: menuPromptChunks.map((text) => ({ type: "say", text, language: "en" })),
+			max_digits: 1,
+			timeout_seconds: 8,
+			inter_digit_timeout_seconds: 3,
+			finish_on_key: null,
+			matches: Object.fromEntries([
+				...faqs.map((_, i): [string, string] => ["faq_" + i, String(i + 1)]),
+				["talk_to_agent", "0"],
+			]),
+		},
+		connections: menuConnections,
+	});
+
+	faqs.forEach((faq, i) => {
+		nodes.push({
+			id: "faq_say_" + i,
+			type: "voice.say",
+			type_version: 1,
+			config: {},
+			input: { text: faq.answer, language: "en" },
+			connections: { next: { node_id: "after_faq_gather", port: "input" } },
+		});
+	});
+
+	nodes.push({
+		id: "after_faq_gather",
+		type: "voice.gather",
+		type_version: 1,
+		config: {},
+		input: {
+			prompts: [{ type: "say", text: "Press 0 to speak with a live agent, or hang up. Thanks for calling.", language: "en" }],
+			max_digits: 1,
+			timeout_seconds: 6,
+			inter_digit_timeout_seconds: 3,
+			finish_on_key: null,
+			matches: { talk_to_agent: "0" },
+		},
+		connections: {
+			talk_to_agent: { node_id: "agent_dial", port: "input" },
+			timeout: { node_id: "exit_done", port: "input" },
+			fallback: { node_id: "exit_done", port: "input" },
+		},
+	});
+
+	nodes.push({
+		id: "agent_dial",
+		type: "voice.dial",
+		type_version: 2,
+		config: {},
+		input: { type: "pstn", pstn: { dest: agentNumber }, timeout_seconds: 30 },
+		connections: {
+			success: { node_id: "exit_transferred", port: "input" },
+			busy: { node_id: "exit_unavailable", port: "input" },
+			no_answer: { node_id: "exit_unavailable", port: "input" },
+			failure: { node_id: "exit_unavailable", port: "input" },
+		},
+	});
+
+	nodes.push({
+		id: "exit_transferred",
+		type: "logic.exit",
+		type_version: 1,
+		config: { status: "succeeded", reason: "transferred" },
+		input: { output: {} },
+		connections: {},
+	});
+	nodes.push({
+		id: "exit_unavailable",
+		type: "logic.exit",
+		type_version: 1,
+		config: { status: "failed", reason: "agent_unavailable" },
+		input: { output: {} },
+		connections: {},
+	});
+	nodes.push({
+		id: "exit_done",
+		type: "logic.exit",
+		type_version: 1,
+		config: { status: "succeeded", reason: "screened" },
+		input: { output: {} },
+		connections: {},
+	});
+
+	return {
+		definition: { schema_version: 1, expression_environment: "bird.cel.v1", nodes },
+		entryNodeId: "start",
+	};
+}
+
+function byteLen(s: string): number {
+	return new TextEncoder().encode(s).length;
+}
+
 /**
  * Builds the per-recipient SMS payloads for POST /v1/sms/batches: the
  * message template rendered with each contact's name, with a STOP

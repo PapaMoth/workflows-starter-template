@@ -18,6 +18,11 @@ import {
 	buildSmsBatchItems,
 	MessageTooLongError,
 	MAX_SMS_BATCH_SIZE,
+	buildScreeningSequenceDefinition,
+	ScreeningTooComplexError,
+	MAX_FAQ_ENTRIES,
+	MAX_GREETING_CHUNKS,
+	type FaqEntry,
 } from "../worker/shane-logic";
 
 describe("normalizePhone", () => {
@@ -327,5 +332,102 @@ describe("buildSmsBatchItems", () => {
 		expect(() => buildSmsBatchItems([{ phone: "+1", name: null }], hugeTemplate, "+1555000")).toThrow(
 			MessageTooLongError,
 		);
+	});
+});
+
+describe("buildScreeningSequenceDefinition", () => {
+	const faqs: FaqEntry[] = [
+		{ label: "store hours", answer: "We're open Monday through Friday, nine to six." },
+		{ label: "pricing", answer: "Plans start at twenty nine dollars a month." },
+	];
+
+	it("builds a greeting, a menu gather, one say per FAQ, and an agent transfer", () => {
+		const { definition, entryNodeId } = buildScreeningSequenceDefinition(
+			"Thanks for calling, how can we help?",
+			faqs,
+			"+15557654321",
+		);
+		expect(entryNodeId).toBe("start");
+		const ids = definition.nodes.map((n) => n.id);
+		expect(ids).toEqual([
+			"start",
+			"greeting",
+			"main_menu",
+			"faq_say_0",
+			"faq_say_1",
+			"after_faq_gather",
+			"agent_dial",
+			"exit_transferred",
+			"exit_unavailable",
+			"exit_done",
+		]);
+	});
+
+	it("maps FAQ digits 1..N and reserves 0 for the live agent", () => {
+		const { definition } = buildScreeningSequenceDefinition("Hi there.", faqs, "+15557654321");
+		const menu = definition.nodes.find((n) => n.id === "main_menu")!;
+		expect(menu.input.matches).toEqual({ faq_0: "1", faq_1: "2", talk_to_agent: "0" });
+		expect(menu.connections.faq_0.node_id).toBe("faq_say_0");
+		expect(menu.connections.talk_to_agent.node_id).toBe("agent_dial");
+	});
+
+	it("routes an unclear choice (timeout/fallback) to the live agent rather than hanging up", () => {
+		const { definition } = buildScreeningSequenceDefinition("Hi there.", faqs, "+15557654321");
+		const menu = definition.nodes.find((n) => n.id === "main_menu")!;
+		expect(menu.connections.timeout.node_id).toBe("agent_dial");
+		expect(menu.connections.fallback.node_id).toBe("agent_dial");
+	});
+
+	it("ends the call politely when the caller doesn't ask for an agent after hearing an answer", () => {
+		const { definition } = buildScreeningSequenceDefinition("Hi there.", faqs, "+15557654321");
+		const afterFaq = definition.nodes.find((n) => n.id === "after_faq_gather")!;
+		expect(afterFaq.connections.timeout.node_id).toBe("exit_done");
+		expect(afterFaq.connections.talk_to_agent.node_id).toBe("agent_dial");
+	});
+
+	it("dials the configured agent number and routes dial outcomes to the right exits", () => {
+		const { definition } = buildScreeningSequenceDefinition("Hi there.", faqs, "+15557654321");
+		const dial = definition.nodes.find((n) => n.id === "agent_dial")!;
+		expect(dial.input).toMatchObject({ type: "pstn", pstn: { dest: "+15557654321" } });
+		expect(dial.connections.success.node_id).toBe("exit_transferred");
+		expect(dial.connections.busy.node_id).toBe("exit_unavailable");
+		expect(dial.connections.no_answer.node_id).toBe("exit_unavailable");
+	});
+
+	it("throws ScreeningTooComplexError with more FAQ entries than digits 1-5 allow", () => {
+		const tooMany: FaqEntry[] = Array.from({ length: MAX_FAQ_ENTRIES + 1 }, (_, i) => ({
+			label: "topic " + i,
+			answer: "answer " + i,
+		}));
+		expect(() => buildScreeningSequenceDefinition("Hi.", tooMany, "+1")).toThrow(ScreeningTooComplexError);
+	});
+
+	it("throws ScreeningTooComplexError when an FAQ answer is too long for one spoken segment", () => {
+		const longAnswer: FaqEntry[] = [{ label: "x", answer: "a".repeat(200) }];
+		expect(() => buildScreeningSequenceDefinition("Hi.", longAnswer, "+1")).toThrow(ScreeningTooComplexError);
+	});
+
+	it("throws ScreeningTooComplexError when the greeting needs more chunks than allowed", () => {
+		const hugeGreeting = Array(200).fill("word").join(" ");
+		expect(() => buildScreeningSequenceDefinition(hugeGreeting, faqs, "+1")).toThrow(ScreeningTooComplexError);
+	});
+
+	it("throws ScreeningTooComplexError when the menu announcement needs more than 4 prompts", () => {
+		const verboseFaqs: FaqEntry[] = Array.from({ length: MAX_FAQ_ENTRIES }, (_, i) => ({
+			label: "a very long and verbose topic label number " + i + " that takes up a lot of space when spoken aloud",
+			answer: "short",
+		}));
+		expect(() => buildScreeningSequenceDefinition("Hi.", verboseFaqs, "+1")).toThrow(ScreeningTooComplexError);
+	});
+
+	it("keeps the total node count well within Bird's 16-node inline-run limit", () => {
+		const { definition } = buildScreeningSequenceDefinition("Thanks for calling.", faqs, "+15557654321");
+		expect(definition.nodes.length).toBeLessThanOrEqual(16);
+	});
+
+	it("respects MAX_GREETING_CHUNKS for a greeting right at the boundary", () => {
+		// Two short sentences chunk to exactly MAX_GREETING_CHUNKS under MAX_SAY_BYTES.
+		const greeting = "a".repeat(MAX_GREETING_CHUNKS * 120);
+		expect(() => buildScreeningSequenceDefinition(greeting, [], "+1")).not.toThrow();
 	});
 });

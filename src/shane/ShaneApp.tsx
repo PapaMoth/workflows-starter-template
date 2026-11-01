@@ -1,22 +1,25 @@
 import { useEffect, useMemo, useState } from "react";
 import { shaneApi } from "./api";
 import {
+	MAX_FAQ_ENTRIES,
 	MAX_SAY_BYTES,
 	MAX_SCRIPT_CHUNKS,
 	MAX_SMS_SEGMENTS,
 	type CampaignPreview,
 	type ParsedContact,
+	type ScreeningFaq,
 	type ShaneCall,
 	type ShaneContact,
 	type ShaneSmsSend,
 	type Suppression,
 } from "./types";
 
-type Tab = "script" | "text" | "contacts" | "calls";
+type Tab = "script" | "text" | "screening" | "contacts" | "calls";
 
 const TABS: { id: Tab; label: string }[] = [
-	{ id: "script", label: "Call script" },
-	{ id: "text", label: "Text campaign" },
+	{ id: "script", label: "Outbound calls" },
+	{ id: "text", label: "Text campaigns" },
+	{ id: "screening", label: "Inbound screening" },
 	{ id: "contacts", label: "Contacts" },
 	{ id: "calls", label: "Call log" },
 ];
@@ -40,9 +43,11 @@ export function ShaneApp() {
 		<div className="flex-1 flex flex-col overflow-hidden px-6 pb-6 gap-4">
 			<div className="flex items-start gap-2 rounded-md bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900 text-amber-800 dark:text-amber-300 text-xs px-3 py-2">
 				<span>
-					Calls read your script aloud and offer a keypad opt-out — not a live two-way conversation — and are placed
-					one contact at a time. Text campaigns send via Bird's SMS batch API to every consented, non-suppressed
-					contact at once. Either way, only reach out to contacts who have actually consented to being contacted.
+					Outbound calls read your script aloud and offer a keypad opt-out, placed one contact at a time. Text
+					campaigns send via Bird's SMS batch API to every consented, non-suppressed contact at once. Inbound
+					screening answers incoming calls with a keypad FAQ menu and transfers to a live agent — not free-form
+					speech understanding or a custom/cloned voice, which would need a separate AI voice runtime. Only reach
+					out to contacts who have actually consented to being contacted.
 				</span>
 			</div>
 
@@ -71,6 +76,7 @@ export function ShaneApp() {
 			<div className="flex-1 overflow-y-auto">
 				{tab === "script" && <ScriptTab onError={setError} />}
 				{tab === "text" && <TextCampaignTab onError={setError} />}
+				{tab === "screening" && <ScreeningTab onError={setError} />}
 				{tab === "contacts" && <ContactsTab onError={setError} />}
 				{tab === "calls" && <CallsTab onError={setError} />}
 			</div>
@@ -319,6 +325,205 @@ function TextCampaignTab({ onError }: { onError: (e: string | null) => void }) {
 							</li>
 						))}
 					</ul>
+				)}
+			</div>
+		</div>
+	);
+}
+
+// ---------------------------------------------------------------------------
+// Inbound call screening (greeting + FAQ menu + live-agent transfer)
+// ---------------------------------------------------------------------------
+
+function ScreeningTab({ onError }: { onError: (e: string | null) => void }) {
+	const [greeting, setGreeting] = useState("");
+	const [agentNumber, setAgentNumber] = useState("");
+	const [faqs, setFaqs] = useState<ScreeningFaq[]>([]);
+	const [loaded, setLoaded] = useState(false);
+	const [saving, setSaving] = useState(false);
+	const [newLabel, setNewLabel] = useState("");
+	const [newAnswer, setNewAnswer] = useState("");
+	const [generated, setGenerated] = useState<string | null>(null);
+	const [generating, setGenerating] = useState(false);
+	const [copied, setCopied] = useState(false);
+
+	const reload = async () => {
+		try {
+			const [config, faqList] = await Promise.all([shaneApi.getScreeningConfig(), shaneApi.listScreeningFaqs()]);
+			setGreeting(config.greeting);
+			setAgentNumber(config.agentNumber ?? "");
+			setFaqs(faqList);
+		} catch (e) {
+			onError(e instanceof Error ? e.message : "Failed to load screening config");
+		} finally {
+			setLoaded(true);
+		}
+	};
+
+	useEffect(() => {
+		reload();
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, []);
+
+	const saveConfig = async () => {
+		setSaving(true);
+		onError(null);
+		setGenerated(null);
+		try {
+			await shaneApi.setScreeningConfig(greeting, agentNumber.trim() || null);
+		} catch (e) {
+			onError(e instanceof Error ? e.message : "Failed to save");
+		} finally {
+			setSaving(false);
+		}
+	};
+
+	const addFaq = async () => {
+		if (!newLabel.trim() || !newAnswer.trim()) return;
+		onError(null);
+		try {
+			await shaneApi.addScreeningFaq(newLabel.trim(), newAnswer.trim());
+			setNewLabel("");
+			setNewAnswer("");
+			await reload();
+		} catch (e) {
+			onError(e instanceof Error ? e.message : "Failed to add FAQ");
+		}
+	};
+
+	const generate = async () => {
+		setGenerating(true);
+		onError(null);
+		setGenerated(null);
+		try {
+			const result = await shaneApi.generateScreeningSequence();
+			setGenerated(JSON.stringify(result.definition, null, 2));
+		} catch (e) {
+			onError(e instanceof Error ? e.message : "Failed to generate sequence");
+		} finally {
+			setGenerating(false);
+		}
+	};
+
+	const copyGenerated = async () => {
+		if (!generated) return;
+		try {
+			await navigator.clipboard.writeText(generated);
+			setCopied(true);
+			setTimeout(() => setCopied(false), 1500);
+		} catch {
+			// clipboard unavailable; the textarea below is still selectable
+		}
+	};
+
+	if (!loaded) return <div className="text-sm text-neutral-500">Loading screening config…</div>;
+
+	const greetingChunks = Math.max(1, Math.ceil(approxByteLen(greeting) / MAX_SAY_BYTES));
+	const greetingTooLong = greetingChunks > 2;
+
+	return (
+		<div className="space-y-5 max-w-2xl">
+			<div className="rounded-md bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-xs text-neutral-600 dark:text-neutral-400 px-3 py-2">
+				This generates a Bird Voice sequence definition — paste it into Bird's dashboard Sequence editor, publish
+				it, and bind your inbound phone number to it there. Bird's sequence publishing isn't something this tool
+				can safely automate.
+			</div>
+
+			<div>
+				<h2 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100">Greeting</h2>
+				<textarea
+					className={`${inputClass} w-full mt-2`}
+					style={{ minHeight: 80 }}
+					value={greeting}
+					onChange={(e) => setGreeting(e.target.value)}
+				/>
+				<p className={`text-xs mt-1 ${greetingTooLong ? "text-red-600 dark:text-red-400 font-medium" : "text-neutral-500"}`}>
+					~{greetingChunks} spoken segment{greetingChunks === 1 ? "" : "s"} (max 2)
+				</p>
+			</div>
+
+			<div>
+				<h2 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100">Live agent number</h2>
+				<input
+					className={`${inputClass} w-full mt-2`}
+					placeholder="+15557654321"
+					value={agentNumber}
+					onChange={(e) => setAgentNumber(e.target.value)}
+				/>
+				<p className="text-xs text-neutral-500 mt-1">
+					Where calls transfer when a caller asks for a person, or doesn't make a clear menu choice.
+				</p>
+			</div>
+
+			<button className={buttonClass} onClick={saveConfig} disabled={saving || !greeting.trim()}>
+				Save
+			</button>
+
+			<div className="border-t border-neutral-200 dark:border-neutral-800 pt-4">
+				<h2 className="text-sm font-semibold text-neutral-900 dark:text-neutral-100 mb-2">
+					FAQ menu ({faqs.length}/{MAX_FAQ_ENTRIES})
+				</h2>
+				<p className="text-xs text-neutral-500 mb-3">
+					Each becomes "press {"N"}" in the menu. Keep answers to one short sentence — they're spoken as a single
+					segment, with no follow-up questions since there's no speech recognition here.
+				</p>
+				<ul className="space-y-1.5 mb-3">
+					{faqs.map((f, i) => (
+						<li
+							key={f.id}
+							className="flex items-start gap-2 rounded-md border border-neutral-200 dark:border-neutral-800 px-3 py-2 text-sm"
+						>
+							<span className="font-mono text-neutral-400">{i + 1}</span>
+							<div className="flex-1">
+								<div className="font-medium text-neutral-900 dark:text-neutral-100">{f.label}</div>
+								<div className="text-xs text-neutral-500">{f.answer}</div>
+							</div>
+							<button
+								className={ghostButtonClass}
+								onClick={() => shaneApi.deleteScreeningFaq(f.id).then(reload)}
+							>
+								Delete
+							</button>
+						</li>
+					))}
+				</ul>
+				{faqs.length < MAX_FAQ_ENTRIES && (
+					<div className="flex flex-wrap gap-2 items-end">
+						<input
+							className={inputClass}
+							placeholder="Label (e.g. store hours)"
+							value={newLabel}
+							onChange={(e) => setNewLabel(e.target.value)}
+						/>
+						<input
+							className={`${inputClass} flex-1 min-w-[200px]`}
+							placeholder="Answer, one short sentence"
+							value={newAnswer}
+							onChange={(e) => setNewAnswer(e.target.value)}
+						/>
+						<button className={ghostButtonClass} onClick={addFaq}>
+							Add
+						</button>
+					</div>
+				)}
+			</div>
+
+			<div className="border-t border-neutral-200 dark:border-neutral-800 pt-4 space-y-2">
+				<button className={buttonClass} onClick={generate} disabled={generating || !agentNumber.trim()}>
+					{generating ? "Generating…" : "Generate sequence for Bird"}
+				</button>
+				{generated && (
+					<div className="space-y-2">
+						<textarea
+							readOnly
+							className={`${inputClass} w-full font-mono text-xs`}
+							style={{ minHeight: 200 }}
+							value={generated}
+						/>
+						<button className={ghostButtonClass} onClick={copyGenerated}>
+							{copied ? "Copied" : "Copy JSON"}
+						</button>
+					</div>
 				)}
 			</div>
 		</div>

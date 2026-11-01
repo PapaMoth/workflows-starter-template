@@ -73,3 +73,25 @@ export interface CampaignSendResult {
 	batches: number;
 	eligibleCount: number;
 }
+
+// Mirrors worker/shane-logic.ts limits, for the screening editor's hint text.
+export const MAX_FAQ_ENTRIES = 5;
+export const MAX_GREETING_CHUNKS = 2;
+
+export interface ScreeningFaq {
+	id: string;
+	label: string;
+	answer: string;
+	createdAt: number;
+}
+
+export interface ScreeningConfig {
+	greeting: string;
+	agentNumber: string | null;
+	updatedAt: number;
+}
+
+export interface GeneratedSequence {
+	entryNodeId: string;
+	definition: unknown;
+}

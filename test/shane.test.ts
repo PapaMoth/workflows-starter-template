@@ -311,3 +311,118 @@ describe("Shane AI SMS campaigns", () => {
 		expect(await res.json()).toEqual([]);
 	});
 });
+
+/**
+ * Exercises the inbound call-screening surface
+ * (worker/shane-screening-routes.ts). "Generate" produces a Bird Voice
+ * sequence definition for the operator to paste into Bird's dashboard —
+ * nothing here places a real call or touches the network.
+ */
+describe("Shane AI call screening", () => {
+	beforeEach(async () => {
+		const faqs = (await (
+			await SELF.fetch("https://example.com/api/shane/screening/faqs")
+		).json()) as Array<{ id: string }>;
+		for (const f of faqs) {
+			await SELF.fetch(`https://example.com/api/shane/screening/faqs/${f.id}`, { method: "DELETE" });
+		}
+	});
+
+	it("gets and updates the screening config, normalizing the agent number", async () => {
+		const current = (await (
+			await SELF.fetch("https://example.com/api/shane/screening/config")
+		).json()) as { greeting: string; agentNumber: string | null };
+		expect(current.greeting.length).toBeGreaterThan(0);
+		expect(current.agentNumber).toBeNull();
+
+		const put = await SELF.fetch("https://example.com/api/shane/screening/config", {
+			method: "PUT",
+			body: JSON.stringify({ greeting: "Hi, thanks for calling.", agentNumber: "(555) 765-4321" }),
+		});
+		expect(put.status).toBe(200);
+		expect((await put.json()) as { agentNumber: string }).toMatchObject({ agentNumber: "+15557654321" });
+	});
+
+	it("rejects an agent number that doesn't look like a phone number", async () => {
+		const res = await SELF.fetch("https://example.com/api/shane/screening/config", {
+			method: "PUT",
+			body: JSON.stringify({ greeting: "Hi.", agentNumber: "not a number" }),
+		});
+		expect(res.status).toBe(400);
+	});
+
+	it("adds and lists FAQ entries, and deletes one", async () => {
+		const add = await SELF.fetch("https://example.com/api/shane/screening/faqs", {
+			method: "POST",
+			body: JSON.stringify({ label: "store hours", answer: "We're open nine to six, Monday to Friday." }),
+		});
+		expect(add.status).toBe(201);
+		const faq = (await add.json()) as { id: string };
+
+		const list = (await (
+			await SELF.fetch("https://example.com/api/shane/screening/faqs")
+		).json()) as unknown[];
+		expect(list).toHaveLength(1);
+
+		const del = await SELF.fetch(`https://example.com/api/shane/screening/faqs/${faq.id}`, { method: "DELETE" });
+		expect(del.status).toBe(204);
+		expect(
+			(await (await SELF.fetch("https://example.com/api/shane/screening/faqs")).json()) as unknown[],
+		).toHaveLength(0);
+	});
+
+	it("rejects a 6th FAQ entry (digits 1-5, 0 reserved for the agent)", async () => {
+		for (let i = 0; i < 5; i++) {
+			const res = await SELF.fetch("https://example.com/api/shane/screening/faqs", {
+				method: "POST",
+				body: JSON.stringify({ label: "topic " + i, answer: "answer " + i }),
+			});
+			expect(res.status).toBe(201);
+		}
+		const sixth = await SELF.fetch("https://example.com/api/shane/screening/faqs", {
+			method: "POST",
+			body: JSON.stringify({ label: "one too many", answer: "answer" }),
+		});
+		expect(sixth.status).toBe(422);
+	});
+
+	it("requires an agent number before generating a sequence", async () => {
+		await SELF.fetch("https://example.com/api/shane/screening/config", {
+			method: "PUT",
+			body: JSON.stringify({ greeting: "Hi.", agentNumber: null }),
+		});
+		const res = await SELF.fetch("https://example.com/api/shane/screening/generate", { method: "POST" });
+		expect(res.status).toBe(400);
+	});
+
+	it("generates a valid sequence definition once greeting and agent number are set", async () => {
+		await SELF.fetch("https://example.com/api/shane/screening/config", {
+			method: "PUT",
+			body: JSON.stringify({ greeting: "Hi, thanks for calling.", agentNumber: "+15557654321" }),
+		});
+		await SELF.fetch("https://example.com/api/shane/screening/faqs", {
+			method: "POST",
+			body: JSON.stringify({ label: "store hours", answer: "We're open nine to six." }),
+		});
+
+		const res = await SELF.fetch("https://example.com/api/shane/screening/generate", { method: "POST" });
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as { entryNodeId: string; definition: { nodes: Array<{ id: string }> } };
+		expect(body.entryNodeId).toBe("start");
+		expect(body.definition.nodes.some((n) => n.id === "agent_dial")).toBe(true);
+	});
+
+	it("surfaces a 422 when the generated sequence would be too complex", async () => {
+		await SELF.fetch("https://example.com/api/shane/screening/config", {
+			method: "PUT",
+			body: JSON.stringify({ greeting: "Hi.", agentNumber: "+15557654321" }),
+		});
+		await SELF.fetch("https://example.com/api/shane/screening/faqs", {
+			method: "POST",
+			body: JSON.stringify({ label: "x", answer: "a".repeat(200) }),
+		});
+
+		const res = await SELF.fetch("https://example.com/api/shane/screening/generate", { method: "POST" });
+		expect(res.status).toBe(422);
+	});
+});

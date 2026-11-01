@@ -41,11 +41,26 @@ export interface ShaneSmsSend {
 	createdAt: number;
 }
 
+export interface ScreeningFaq {
+	id: string;
+	label: string;
+	answer: string;
+	createdAt: number;
+}
+
+export interface ScreeningConfig {
+	greeting: string;
+	agentNumber: string | null;
+	updatedAt: number;
+}
+
 const DEFAULT_SCRIPT =
 	"Hi, this is Shane calling on behalf of our team. I'm following up about your recent interest — do you have a quick minute?";
 
 const DEFAULT_TEXT_MESSAGE =
 	"Hi {{name}}, this is Shane following up about your recent interest. Reply STOP to opt out.";
+
+const DEFAULT_GREETING = "Thanks for calling. Let's get you to the right place.";
 
 /**
  * ShaneStoreDO - single-instance Durable Object holding Shane AI's state:
@@ -102,6 +117,18 @@ export class ShaneStoreDO extends DurableObject {
 					outcome TEXT,
 					created_at INTEGER NOT NULL
 				);
+				CREATE TABLE IF NOT EXISTS screening_config (
+					id TEXT PRIMARY KEY DEFAULT 'current',
+					greeting TEXT NOT NULL,
+					agent_number TEXT,
+					updated_at INTEGER NOT NULL
+				);
+				CREATE TABLE IF NOT EXISTS screening_faqs (
+					id TEXT PRIMARY KEY,
+					label TEXT NOT NULL,
+					answer TEXT NOT NULL,
+					created_at INTEGER NOT NULL
+				);
 			`);
 
 			const existing = this.ctx.storage.sql.exec("SELECT id FROM script WHERE id = 'current'").toArray();
@@ -118,6 +145,17 @@ export class ShaneStoreDO extends DurableObject {
 				this.ctx.storage.sql.exec(
 					"INSERT INTO text_message (id, body, updated_at) VALUES ('current', ?, ?)",
 					DEFAULT_TEXT_MESSAGE,
+					Date.now(),
+				);
+			}
+
+			const existingScreening = this.ctx.storage.sql
+				.exec("SELECT id FROM screening_config WHERE id = 'current'")
+				.toArray();
+			if (existingScreening.length === 0) {
+				this.ctx.storage.sql.exec(
+					"INSERT INTO screening_config (id, greeting, agent_number, updated_at) VALUES ('current', ?, NULL, ?)",
+					DEFAULT_GREETING,
 					Date.now(),
 				);
 			}
@@ -333,6 +371,61 @@ export class ShaneStoreDO extends DurableObject {
 		}
 		return results;
 	}
+
+	// ---- Call screening (inbound) ----
+
+	async getScreeningConfig(): Promise<ScreeningConfig> {
+		const row = this.ctx.storage.sql.exec("SELECT * FROM screening_config WHERE id = 'current'").toArray()[0];
+		return {
+			greeting: String(row.greeting),
+			agentNumber: row.agent_number == null ? null : String(row.agent_number),
+			updatedAt: Number(row.updated_at),
+		};
+	}
+
+	async setScreeningConfig(greeting: string, agentNumber: string | null): Promise<ScreeningConfig> {
+		const updatedAt = Date.now();
+		this.ctx.storage.sql.exec(
+			"UPDATE screening_config SET greeting = ?, agent_number = ?, updated_at = ? WHERE id = 'current'",
+			greeting,
+			agentNumber,
+			updatedAt,
+		);
+		return { greeting, agentNumber, updatedAt };
+	}
+
+	async listScreeningFaqs(): Promise<ScreeningFaq[]> {
+		return this.ctx.storage.sql
+			.exec("SELECT * FROM screening_faqs ORDER BY created_at ASC")
+			.toArray()
+			.map(rowToScreeningFaq);
+	}
+
+	async addScreeningFaq(label: string, answer: string): Promise<ScreeningFaq> {
+		const id = crypto.randomUUID();
+		const createdAt = Date.now();
+		this.ctx.storage.sql.exec(
+			"INSERT INTO screening_faqs (id, label, answer, created_at) VALUES (?, ?, ?, ?)",
+			id,
+			label,
+			answer,
+			createdAt,
+		);
+		return { id, label, answer, createdAt };
+	}
+
+	async deleteScreeningFaq(id: string): Promise<void> {
+		this.ctx.storage.sql.exec("DELETE FROM screening_faqs WHERE id = ?", id);
+	}
+}
+
+function rowToScreeningFaq(row: Record<string, unknown>): ScreeningFaq {
+	return {
+		id: String(row.id),
+		label: String(row.label),
+		answer: String(row.answer),
+		createdAt: Number(row.created_at),
+	};
 }
 
 function rowToContact(row: Record<string, unknown>): ShaneContact {

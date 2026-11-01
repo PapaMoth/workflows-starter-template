@@ -6,6 +6,7 @@ import {
 	ScriptTooLongError,
 } from "./shane-logic";
 import { handleShaneCampaignRequest, handleShaneTextRequest } from "./shane-sms-routes";
+import { handleShaneScreeningRequest } from "./shane-screening-routes";
 
 /**
  * REST routing for /api/shane/* — manages Shane AI's script, contacts,
@@ -52,6 +53,10 @@ export async function handleShaneRequest(request: Request, env: Env): Promise<Re
 
 		if (section === "campaign") {
 			return await handleShaneCampaignRequest(request, env, parts[3]);
+		}
+
+		if (section === "screening") {
+			return await handleShaneScreeningRequest(request, env, parts[3], parts[4]);
 		}
 
 		if (section === "script") {

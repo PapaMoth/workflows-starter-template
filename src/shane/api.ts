@@ -1,7 +1,10 @@
 import type {
 	CampaignPreview,
 	CampaignSendResult,
+	GeneratedSequence,
 	ParsedContact,
+	ScreeningConfig,
+	ScreeningFaq,
 	ShaneCall,
 	ShaneContact,
 	ShaneSmsSend,
@@ -62,4 +65,16 @@ export const shaneApi = {
 	sendCampaign: (confirmCount: number) =>
 		request<CampaignSendResult>("/campaign/send", { method: "POST", body: JSON.stringify({ confirmCount }) }),
 	listSmsSends: () => request<ShaneSmsSend[]>("/campaign/sends"),
+
+	getScreeningConfig: () => request<ScreeningConfig>("/screening/config"),
+	setScreeningConfig: (greeting: string, agentNumber: string | null) =>
+		request<ScreeningConfig>("/screening/config", {
+			method: "PUT",
+			body: JSON.stringify({ greeting, agentNumber }),
+		}),
+	listScreeningFaqs: () => request<ScreeningFaq[]>("/screening/faqs"),
+	addScreeningFaq: (label: string, answer: string) =>
+		request<ScreeningFaq>("/screening/faqs", { method: "POST", body: JSON.stringify({ label, answer }) }),
+	deleteScreeningFaq: (id: string) => request<void>(`/screening/faqs/${id}`, { method: "DELETE" }),
+	generateScreeningSequence: () => request<GeneratedSequence>("/screening/generate", { method: "POST" }),
 };
