@@ -17,6 +17,7 @@
 		"docs_url": "https://developers.cloudflare.com/workflows/"
 	},
 	"dependencies": {
+		"pdfjs-dist": "^6.5.438",
 		"react": "19.2.1",
 		"react-dom": "19.2.1"
 	},
