@@ -28,3 +28,8 @@ dist-ssr
 !.dev.vars.example
 .env*
 !.env.example
+
+# Clawness — per-machine session state (memory.md and rules/ stay shared)
+.clawness/*
+!.clawness/memory.md
+!.clawness/rules/
